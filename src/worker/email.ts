@@ -1,22 +1,24 @@
 /**
  * 邮件发送（Resend API）。
  *
- * 只需要一个 `RESEND_API_KEY`：`POST https://api.resend.com/emails`
- *   - secret 写入：`npx wrangler secret put RESEND_API_KEY`（本地开发放 `.dev.vars`）
- *   - 发件人：`RESEND_FROM_EMAIL`，默认 `Qafield <onboarding@resend.dev>`
- *     （用自备域名时改成自己的，例如 `Qafield <noreply@your-domain.com>`）
+ * 发信身份不再写死：密钥与发件人都来自「后台 → 站点设置」（D1 `settings` 表），
+ * 没配时回落到 `RESEND_API_KEY` / `RESEND_FROM_EMAIL` 环境变量，再回落默认值：
+ *   - 密钥：`npx wrangler secret put RESEND_API_KEY`（本地开发放 `.dev.vars`），
+ *     也可以直接在后台粘贴（优先用后台里配的那份）；
+ *   - 发件人：默认 `Varysheet <admin@varysheet.com>`，用自备域名时在后台改成
+ *     例如 `Varysheet <noreply@your-domain.com>`。
  *
  * 两种「不发真邮件」的情形都不会抛错，而是返回 `{ ok: false, reason: 'not_configured' }`，
  * 由调用方把确认码直接回显在响应里，这样本地开发和自动化测试都能跑通完整注册流程：
- *   1. 没有配置 `RESEND_API_KEY`（还没配 secret）；
+ *   1. 没有配置 Resend 密钥（后台和环境变量里都没有）；
  *   2. 收件人域在 `AUTH_ECHO_CODE_DOMAINS` 里（默认 example.com / test / invalid 这类**保留域**，
  *      永远收不到邮件，所以回显不会削弱真实邮箱的验证强度）。
  */
 import { badGateway } from './http';
+import type { SiteSettings } from './settings';
 import type { Env } from './types';
 
 const RESEND_ENDPOINT = 'https://api.resend.com/emails';
-const DEFAULT_FROM = 'Qafield <onboarding@resend.dev>';
 
 export type EmailResult =
   | { ok: true }
@@ -29,10 +31,6 @@ export interface EmailMessage {
   text: string;
 }
 
-function appName(env: Env): string {
-  return env.APP_NAME || 'Qafield';
-}
-
 function escapeHtml(text: string): string {
   return text
     .replaceAll('&', '&amp;')
@@ -42,8 +40,8 @@ function escapeHtml(text: string): string {
 }
 
 /** 收件人是否属于「直接回显确认码」的域名（保留测试域）。 */
-export function shouldEchoCode(env: Env, email: string): boolean {
-  if (!env.RESEND_API_KEY) return true;
+export function shouldEchoCode(env: Env, email: string, settings: SiteSettings): boolean {
+  if (!settings.resendApiKey) return true;
   const domain = email.split('@')[1]?.toLowerCase() ?? '';
   if (!domain) return false;
   const allow = (env.AUTH_ECHO_CODE_DOMAINS ?? '')
@@ -53,9 +51,9 @@ export function shouldEchoCode(env: Env, email: string): boolean {
   return allow.includes(domain);
 }
 
-export async function sendEmail(env: Env, message: EmailMessage): Promise<EmailResult> {
-  if (!env.RESEND_API_KEY) {
-    return { ok: false, reason: 'not_configured', detail: '未配置 RESEND_API_KEY' };
+export async function sendEmail(settings: SiteSettings, message: EmailMessage): Promise<EmailResult> {
+  if (!settings.resendApiKey) {
+    return { ok: false, reason: 'not_configured', detail: '未配置 Resend API Key' };
   }
 
   let response: Response;
@@ -63,11 +61,11 @@ export async function sendEmail(env: Env, message: EmailMessage): Promise<EmailR
     response = await fetch(RESEND_ENDPOINT, {
       method: 'POST',
       headers: {
-        authorization: `Bearer ${env.RESEND_API_KEY}`,
+        authorization: `Bearer ${settings.resendApiKey}`,
         'content-type': 'application/json',
       },
       body: JSON.stringify({
-        from: env.RESEND_FROM_EMAIL || DEFAULT_FROM,
+        from: settings.resendFromEmail,
         to: [message.to],
         subject: message.subject,
         html: message.html,
@@ -99,8 +97,11 @@ export async function sendEmail(env: Env, message: EmailMessage): Promise<EmailR
 
 /** 发不出邮件时的统一错误（调用方会先判断 `shouldEchoCode`）。 */
 export function emailFailure(result: Extract<EmailResult, { ok: false }>, label = '确认邮件'): never {
-  throw badGateway(`${label}发送失败：${result.detail}（请检查 RESEND_API_KEY 与 RESEND_FROM_EMAIL）`);
+  throw badGateway(
+    `${label}发送失败：${result.detail}（请检查后台「站点设置」里的 Resend 密钥与发件人，或 Worker secret / .dev.vars）`,
+  );
 }
+
 
 /* --------------------------------------------------------------- 邮件模板 */
 
@@ -116,10 +117,10 @@ const MAIL_PAGE = (app: string, body: string) => `<!doctype html>
 
 /** 注册确认码邮件。 */
 export function verificationCodeEmail(
-  env: Env,
+  settings: SiteSettings,
   input: { code: string; name: string; minutes: number },
 ): EmailMessage {
-  const app = appName(env);
+  const app = settings.siteName;
   const who = escapeHtml(input.name || '你好');
   const subject = `${app} 注册确认码：${input.code}`;
   const text = [
@@ -145,8 +146,8 @@ export function verificationCodeEmail(
 }
 
 /** 管理员重置密码后，把新密码通知给用户（尽力而为，失败不影响重置本身）。 */
-export function passwordResetEmail(env: Env, input: { name: string; password: string }): EmailMessage {
-  const app = appName(env);
+export function passwordResetEmail(settings: SiteSettings, input: { name: string; password: string }): EmailMessage {
+  const app = settings.siteName;
   const who = escapeHtml(input.name || '你好');
   const subject = `${app} 密码已被管理员重置`;
   const text = [
@@ -172,7 +173,7 @@ export function passwordResetEmail(env: Env, input: { name: string; password: st
  * 对方点链接进 `/invite/<token>`，填昵称 + 密码即完成注册，并自动获得这条视图分享。
  */
 export function viewInviteEmail(
-  env: Env,
+  settings: SiteSettings,
   input: {
     inviterName: string;
     databaseName: string;
@@ -183,7 +184,7 @@ export function viewInviteEmail(
     days: number;
   },
 ): EmailMessage {
-  const app = appName(env);
+  const app = settings.siteName;
   const inviter = input.inviterName || '有人';
   const database = input.databaseName || '表格';
   const view = input.viewName || '视图';

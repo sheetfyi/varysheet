@@ -1,5 +1,5 @@
 /**
- * Qafield worker entry point.
+ * Varysheet worker entry point.
  *
  * `/api/*` is handled here (see `run_worker_first` in wrangler.jsonc); every
  * other request falls through to the static asset store which serves the Vite
@@ -9,6 +9,7 @@ import { getCurrentUser, purgeExpiredSessions } from './auth';
 import { errorToResponse, json } from './http';
 import { adminRoutes } from './routes/admin';
 import { authRoutes } from './routes/auth';
+import { brandingRoutes } from './routes/branding';
 import { databaseRoutes } from './routes/databases';
 import { fileRoutes } from './routes/files';
 import { inviteRoutes } from './routes/invites';
@@ -18,10 +19,13 @@ import { publicRoutes } from './routes/public';
 import { quotaRoutes } from './routes/quota';
 import { recordRoutes } from './routes/records';
 import { viewRoutes } from './routes/views';
+import { purgeExpiredBasicData } from './retention';
+import { DEFAULT_SITE_NAME } from './settings';
 import type { Env, RequestContext, Route, RouteHandler } from './types';
 
 const API_ROUTES: Route[] = [
   ...authRoutes,
+  ...brandingRoutes,
   ...inviteRoutes,
   ...adminRoutes,
   ...quotaRoutes,
@@ -85,7 +89,7 @@ function withSecurityHeaders(response: Response, env: Env): Response {
   const headers = new Headers(response.headers);
   headers.set('x-content-type-options', 'nosniff');
   headers.set('referrer-policy', 'strict-origin-when-cross-origin');
-  headers.set('x-served-by', env.APP_NAME ?? 'Qafield');
+  headers.set('x-served-by', env.APP_NAME ?? DEFAULT_SITE_NAME);
   return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,
@@ -97,7 +101,8 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   try {
     if (url.pathname === '/api/health') {
-      return json({ ok: true, app: env.APP_NAME ?? 'Qafield', time: Date.now() });
+      // 站点名称在后台可改，健康检查只用环境变量 / 代码默认值，避免多查一次数据库
+      return json({ ok: true, app: env.APP_NAME ?? DEFAULT_SITE_NAME, time: Date.now() });
     }
 
     const { match, otherMethod } = matchRoute(request.method.toUpperCase(), url.pathname);
@@ -143,5 +148,15 @@ export default {
       return env.ASSETS.fetch(request);
     }
     return new Response('Not found', { status: 404 });
+  },
+
+  /**
+   * 定时任务（`wrangler.jsonc` 的 `triggers.crons`，每天 03:00 UTC）：
+   * 清理基础表格里超过保留期（默认一年）的记录与附件 —— 专业表格不受影响。
+   * 逻辑见 `src/worker/retention.ts`；管理员也可以手动跑
+   * `POST /api/admin/maintenance/retention`。
+   */
+  async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(purgeExpiredBasicData(env).catch(() => undefined));
   },
 };

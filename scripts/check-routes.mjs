@@ -71,7 +71,7 @@ rows.sort((a, b) => {
 });
 
 const width = Math.max(...rows.map((row) => row.method.length));
-console.log(`Qafield API surface - ${rows.length} routes\n`);
+console.log(`Varysheet API surface - ${rows.length} routes\n`);
 for (const row of rows) {
   console.log(`  ${row.method.padEnd(width)}  ${row.path.padEnd(44)} ${row.file}`);
 }

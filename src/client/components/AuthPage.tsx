@@ -5,13 +5,25 @@ import { confirmSessionLanded } from '../lib/session';
 
 interface AuthPageProps {
   appName: string;
+  /** 站点图标（管理员上传过才有）：登录 / 注册卡片顶部跟着站点名称一起显示 */
+  siteIconUrl: string | null;
   onAuthenticated: (user: SessionUser) => void;
 }
 
 /** 重发确认码的冷却秒数，与 Worker 端 `RESEND_COOLDOWN_MS` 一致 */
 const RESEND_COOLDOWN_SECONDS = 60;
 
-export function AuthPage({ appName, onAuthenticated }: AuthPageProps) {
+/** 登录 / 注册卡片顶部的站点标识：上传过图标就显示图标，否则只显示站点名称。 */
+function BrandHead({ appName, siteIconUrl }: { appName: string; siteIconUrl: string | null }) {
+  return (
+    <>
+      {siteIconUrl ? <img className="auth-logo" src={siteIconUrl} alt="" /> : null}
+      <h1>{appName}</h1>
+    </>
+  );
+}
+
+export function AuthPage({ appName, siteIconUrl, onAuthenticated }: AuthPageProps) {
   const [mode, setMode] = useState<'login' | 'register'>('login');
   /** 注册是两步：先填资料（form），再填邮件里的确认码（code） */
   const [step, setStep] = useState<'form' | 'code'>('form');
@@ -128,7 +140,7 @@ export function AuthPage({ appName, onAuthenticated }: AuthPageProps) {
     return (
       <div className="centered">
         <form className="auth-card" onSubmit={verify}>
-          <h1>{appName}</h1>
+          <BrandHead appName={appName} siteIconUrl={siteIconUrl} />
           <p className="muted">输入邮件里的确认码，完成注册</p>
 
           <p className="small muted">
@@ -195,7 +207,7 @@ export function AuthPage({ appName, onAuthenticated }: AuthPageProps) {
   return (
     <div className="centered">
       <form className="auth-card" onSubmit={submit}>
-        <h1>{appName}</h1>
+        <BrandHead appName={appName} siteIconUrl={siteIconUrl} />
         <p className="muted">{mode === 'login' ? '登录以继续你的表格' : '创建账号，开始搭建你的数据库'}</p>
 
         {mode === 'register' ? (

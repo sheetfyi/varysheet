@@ -1,4 +1,4 @@
--- Qafield - 管理员账号 + 邮件确认码（D1 / SQLite）
+-- Varysheet - 管理员账号 + 邮件确认码（D1 / SQLite）
 -- Applied with:  npx wrangler d1 migrations apply cloudnotion-db --local|--remote
 --
 -- 1) users.is_admin：管理员（超级用户）标记。

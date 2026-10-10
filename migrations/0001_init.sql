@@ -1,4 +1,4 @@
--- Qafield - initial schema (D1 / SQLite)
+-- Varysheet - initial schema (D1 / SQLite)
 -- Applied with:  npx wrangler d1 migrations apply cloudnotion-db --local|--remote
 
 CREATE TABLE IF NOT EXISTS users (

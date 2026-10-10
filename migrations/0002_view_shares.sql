@@ -1,4 +1,4 @@
--- Qafield - view level sharing + structure lock (D1 / SQLite)
+-- Varysheet - view level sharing + structure lock (D1 / SQLite)
 -- Applied with:  npx wrangler d1 migrations apply cloudnotion-db --local|--remote
 
 -- 表格锁定：锁定后字段 / 视图等结构只读，记录数据仍可编辑

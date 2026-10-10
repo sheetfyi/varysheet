@@ -4,11 +4,21 @@
  * 这里只放纯函数（不读环境变量、不碰数据库），所以服务端能拿它拼错误文案、
  * 前端能拿它画侧边栏进度条。上限本身由 Worker 读环境变量得出，
  * 见 `src/worker/capacity.ts`；数据结构见 `types.ts` 的 `DatabaseCapacity`。
+ *
+ * 专业表格 `unlimited = true`（记录数 / 附件上限都是 0 = 不限），文案统一显示
+ * 「不限」，永远不判满、进度条恒为正常档位。
  */
+import { retentionText, tableKindMeta } from './tableKind';
 import type { DatabaseCapacity } from './types';
 
 /** 容量提示开始变色的占比：记录数 / 附件占用任一维度超过 80% 就转黄提醒 */
 export const CAPACITY_WARN_RATIO = 0.8;
+
+/** 专业表格（或上限为 0 的表）＝ 容量不限：进度条 / 文案都走「不限」分支 */
+export function capacityUnlimited(capacity: DatabaseCapacity): boolean {
+  if (capacity.unlimited) return true;
+  return capacity.maxRecords <= 0 && capacity.maxStorageBytes <= 0;
+}
 
 /** 人类可读的容量：1024 → `1 KB`、1.5 MB、1 GB */
 export function formatBytes(bytes: number): string {
@@ -87,16 +97,21 @@ export function capacityStorageSide(capacity: DatabaseCapacity): CapacitySide {
 
 /** 用量明细（悬停提示的第一行 / 达到上限后的说明都用它） */
 export function capacityUsageSummary(capacity: DatabaseCapacity): string {
+  if (capacityUnlimited(capacity)) {
+    return `记录 ${capacity.records} 条 · 附件 ${formatBytes(capacity.storageBytes)}（不限容量）`;
+  }
   return `记录 ${capacity.records}/${capacity.maxRecords} 条 · 附件 ${formatBytes(capacity.storageBytes)}/${formatBytes(capacity.maxStorageBytes)}`;
 }
 
-/** 容量提示框里「记录」那一行：`已用 12 / 500 条 · 剩余 488 条` */
+/** 容量提示框里「记录」那一行：`已用 12 / 500 条 · 剩余 488 条`（不限容量时只报已用） */
 export function capacityRecordsUsageText(capacity: DatabaseCapacity): string {
+  if (capacityUnlimited(capacity)) return `已用 ${capacity.records} 条 · 不限`;
   return `已用 ${capacity.records} / ${capacity.maxRecords} 条 · 剩余 ${capacityRecordsSide(capacity).remaining} 条`;
 }
 
-/** 容量提示框里「附件」那一行：`已用 3.2 MB / 1 GB · 剩余 1016.8 MB` */
+/** 容量提示框里「附件」那一行：`已用 3.2 MB / 1 GB · 剩余 1016.8 MB`（不限容量时只报已用） */
 export function capacityStorageUsageText(capacity: DatabaseCapacity): string {
+  if (capacityUnlimited(capacity)) return `已用 ${formatBytes(capacity.storageBytes)} · 不限`;
   return `已用 ${formatBytes(capacity.storageBytes)} / ${formatBytes(capacity.maxStorageBytes)} · 剩余 ${formatBytes(
     capacityStorageSide(capacity).remaining,
   )}`;
@@ -105,10 +120,25 @@ export function capacityStorageUsageText(capacity: DatabaseCapacity): string {
 /** 悬停提示：用量明细 + 当前档位的说明 */
 export function capacityTooltip(capacity: DatabaseCapacity): string {
   const usage = capacityUsageSummary(capacity);
+  if (capacityUnlimited(capacity)) {
+    return `${usage}\n${tableKindMeta(capacity.kind).label}：记录、附件与存储时间都不限制`;
+  }
   if (!capacity.atCapacity) {
     return `${usage}\n已用 ${capacityPercent(capacity)}%：到上限后只能查看和查询，新增记录 / 上传附件会停用`;
   }
   return `${usage}\n${capacityBlockedHint(capacity)}`;
+}
+
+/**
+ * 保留期提示：基础表格的「数据保留 1 年，超期自动清除」写在容量浮层里，
+ * 专业表格返回空串（不限保留期，不用提示）。
+ */
+export function capacityRetentionHint(capacity: DatabaseCapacity): string {
+  if (capacityUnlimited(capacity)) return '';
+  const meta = tableKindMeta(capacity.kind);
+  const days = capacity.retentionDays ?? meta.retentionDays;
+  if (!Number.isFinite(days) || days <= 0) return '';
+  return `${meta.label}的数据保留${retentionText(days)}：超过这个时间的记录与附件会被自动清除`;
 }
 
 /**
@@ -122,5 +152,5 @@ export function capacityBlockedHint(capacity: DatabaseCapacity): string {
   if (capacity.storageFull) {
     full.push(`附件 ${formatBytes(capacity.storageBytes)}/${formatBytes(capacity.maxStorageBytes)}`);
   }
-  return `已达容量上限（${full.join(' · ')}）：只能查看和查询，新增记录、复制记录与上传附件都已停用，删除一些数据后自动恢复`;
+  return `${tableKindMeta(capacity.kind).label}已达容量上限（${full.join(' · ')}）：只能查看和查询，新增记录、复制记录与上传附件都已停用，删除一些数据后自动恢复`;
 }

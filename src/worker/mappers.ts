@@ -15,6 +15,7 @@ import type {
   ViewType,
 } from '../shared/types';
 import { mergeViewConfig } from '../shared/views';
+import { asTableKind } from '../shared/tableKind';
 import { parseJsonObject, sqlNullableString, sqlNumber, sqlString, type SqlRow } from './http';
 
 export function propertyFromRow(row: SqlRow): Property {
@@ -101,6 +102,8 @@ export function databaseSummaryFromRow(
     id: sqlString(row, 'id'),
     name: sqlString(row, 'name'),
     icon: sqlString(row, 'icon', '📋'),
+    // 表格类型：老库（迁移前）里的行没有 kind，按基础表格处理
+    kind: asTableKind(sqlString(row, 'kind', 'basic')),
     description: sqlString(row, 'description'),
     ownerId: sqlString(row, 'owner_id'),
     ownerName: sqlNullableString(row, 'owner_name') ?? undefined,

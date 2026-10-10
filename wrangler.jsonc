@@ -43,14 +43,28 @@
     }
   ],
 
+  // ---- 定时任务（Cron Triggers）----------------------------------------
+  // 每天 03:00 UTC（北京时间 11:00）跑一次「基础表格保留期清理」：基础表格里
+  // 超过一年（BASIC_TABLE_RETENTION_DAYS）的记录与附件会被自动清除，专业表格
+  // 不受影响。逻辑见 src/worker/retention.ts，入口是 index.ts 的 scheduled()。
+  // 本地调试可以 `npx wrangler dev --test-scheduled` 后请求 /__scheduled 手动触发，
+  // 或者用管理员接口 POST /api/admin/maintenance/retention。
+  "triggers": {
+    "crons": ["0 3 * * *"]
+  },
+
   "vars": {
-    "APP_NAME": "Qafield",
+    "APP_NAME": "Varysheet",
     "MAX_UPLOAD_MB": "25",
-    // 单表容量：到上限后只拦「增长」（新建 / 批量新建 / 复制记录 / 上传附件会被
-    // 403 capacity_exceeded 挡下），查看 / 查询 / 改已有记录 / 删除都不受影响。
-    // 侧边栏里每张表后面的进度条就是这两个维度的用量。
+    // 基础表格的单表容量：到上限后只拦「增长」（新建 / 批量新建 / 复制记录 /
+    // 上传附件会被 403 capacity_exceeded 挡下），查看 / 查询 / 改已有记录 / 删除
+    // 都不受影响。侧边栏里每张表后面的进度条就是这两个维度的用量。
+    // 专业表格不限容量，这两个值对它没有影响。
     "MAX_DATABASE_RECORDS": "500",
     "MAX_DATABASE_STORAGE_MB": "1024",
+    // 基础表格的数据保留期（天）：超过这个时间的记录与附件会被定时任务清除；
+    // 专业表格永久保留。设成 0 可以关闭自动清理（只建议本地调试时用）。
+    "BASIC_TABLE_RETENTION_DAYS": "365",
     // set to "false" to close public registration
     "ALLOW_SIGNUP": "true",
     // 注册确认码（邮箱验证）的有效期，分钟

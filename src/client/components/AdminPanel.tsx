@@ -1,21 +1,25 @@
 /**
- * 用户管理（超级管理员的「后台」页面）。
+ * 「后台」（超级管理员的页面）。
  *
- * 只做四件事：查看全部注册用户、修改注册信息（昵称 / 邮箱）、重置密码、
- * 勾选第一列的复选框批量删除账号。
+ * 两块内容：
+ *   1. 站点设置：站点名称 / 图标 / 管理员邮箱 / Resend 发信（见 SiteSettingsCard）；
+ *   2. 用户管理：查看全部注册用户、修改注册信息（昵称 / 邮箱）、重置密码、批量删除账号。
  * 权限在服务端（`/api/admin/*` 全部走 `requireAdmin`），这里只是入口的显隐。
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { AdminUser, SessionUser } from '../../shared/types';
+import type { AdminUser, BrandingResponse, SessionUser } from '../../shared/types';
 import { ApiError, api } from '../api';
 import { EditUserDialog } from './EditUserDialog';
 import { ResetResultCard, type ResetResult } from './ResetResultCard';
+import { SiteSettingsCard } from './SiteSettingsCard';
 
 interface AdminPanelProps {
   me: SessionUser | null;
   onToast: (message: string, kind?: 'info' | 'error') => void;
   /** 改了自己的资料 / 重置了自己的密码之后，让 App 重新拉一次会话 */
   onReloadSession: () => void;
+  /** 站点设置保存成功：把最新品牌信息交给 App（侧边栏标识 / 页面标题 / favicon 立刻更新） */
+  onBrandingChange: (branding: BrandingResponse) => void;
 }
 
 const PAGE_SIZE = 50;
@@ -26,7 +30,7 @@ export function formatTime(value: number | null): string {
   return new Date(value).toLocaleString('zh-CN', { hour12: false });
 }
 
-export function AdminPanel({ me, onToast, onReloadSession }: AdminPanelProps) {
+export function AdminPanel({ me, onToast, onReloadSession, onBrandingChange }: AdminPanelProps) {
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
@@ -131,6 +135,12 @@ export function AdminPanel({ me, onToast, onReloadSession }: AdminPanelProps) {
 
   return (
     <section className="admin-panel">
+      <SiteSettingsCard
+        onToast={onToast}
+        onBrandingChange={onBrandingChange}
+        onReloadSession={onReloadSession}
+      />
+
       <div className="admin-head">
         <h2 className="page-title">用户管理</h2>
         <span className="small muted">

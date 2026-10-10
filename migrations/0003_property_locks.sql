@@ -1,4 +1,4 @@
--- Qafield - 字段级锁定（D1 / SQLite）
+-- Varysheet - 字段级锁定（D1 / SQLite）
 -- Applied with:  npx wrangler d1 migrations apply cloudnotion-db --local|--remote
 --
 -- 锁定字段：锁定后该字段在所有记录里只读 —— 原有的编辑 / 上传入口全部失效，

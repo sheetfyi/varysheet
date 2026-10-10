@@ -23,6 +23,7 @@ import type {
 import { defaultViewConfig } from '../../shared/views';
 import { conditionConjunction, groupFilterConditions, type Conjunction } from '../../shared/viewFilter';
 import { capacityBlockedHint, capacityTooltip } from '../../shared/capacity';
+import { tableKindCapacityText, tableKindMeta } from '../../shared/tableKind';
 import { ApiError, api } from '../api';
 import { useCellEditLocks } from '../lib/cellEditLocks';
 import { applyView, groupRows, visibleProperties } from '../lib/viewEngine';
@@ -151,12 +152,20 @@ export function DatabasePage({
 
   const { properties, views, members } = detail;
   const role: Role = detail.role;
+  /** 表格类型（基础 / 专业）：列数、视图数与容量上限都按它取 */
+  const kindMeta = tableKindMeta(detail.kind);
   const canEdit = role === 'owner' || role === 'editor';
   const isOwner = role === 'owner';
   /** 仅通过视图定向分享获得的访问权（只能看到被分享的视图） */
   const viewScoped = detail.viewScoped;
   /** 字段 / 视图结构是否可改：只看访问权（表级锁定功能已移除） */
   const canEditStructure = canEdit && !viewScoped;
+  /**
+   * 列数 / 视图数到上限：把「＋」置灰并给一句人话（服务端同样会 403 `limit_exceeded`
+   * 兜底）。只拦新增 —— 已超限的老表仍然能删字段 / 删视图把自己收拾回上限以内。
+   */
+  const canAddView = views.length < kindMeta.maxViews;
+  const addViewHint = `${kindMeta.label}最多 ${kindMeta.maxViews} 个视图（当前 ${views.length} 个）：删掉一些视图后再添加，或换成专业表格`;
 
   /**
    * 容量到上限后**只拦增长**：新建记录 / 复制记录 / 上传附件之前先在本地挡一下
@@ -696,7 +705,7 @@ export function DatabasePage({
 
   /* ------------------------------------------------------------------ views */
 
-  const patchView = async (viewId: string, patch: { name?: string; config?: ViewConfig; locked?: boolean }) => {
+  const patchView = async (viewId: string, patch: { name?: string; config?: ViewConfig }) => {
     try {
       const result = await api.updateView(viewId, patch);
       setDetail((prev) => ({ ...prev, views: result.views }));
@@ -710,7 +719,7 @@ export function DatabasePage({
     void patchView(activeView.id, { config: { ...activeView.config, ...patch } });
   };
 
-  /** 新建视图：自定义名称 + 筛选条件 + 锁定 + 可选定向分享。 */
+  /** 新建视图：自定义名称 + 筛选条件 + 可选定向分享（视图锁定入口已下线）。 */
   const createView = async (input: NewViewInput) => {
     if (!canEditStructure) return;
     try {
@@ -718,7 +727,6 @@ export function DatabasePage({
         type: input.type,
         name: input.name || undefined,
         config: { ...defaultViewConfig(input.type), filters: input.filters },
-        locked: input.locked,
       });
       setDetail((prev) => ({ ...prev, views: result.views }));
       setActiveViewId(result.viewId);
@@ -750,11 +758,6 @@ export function DatabasePage({
   const renameView = (viewId: string, name: string) => {
     if (!viewEditable) return;
     void patchView(viewId, { name });
-  };
-
-  const lockView = (viewId: string, locked: boolean) => {
-    if (!canEditStructure) return;
-    void patchView(viewId, { locked });
   };
 
   const deleteView = async (viewId: string) => {
@@ -978,8 +981,12 @@ export function DatabasePage({
             }}
           />
           <span className={`badge role-${role}`}>{ROLE_LABEL[role]}</span>
+          {/* 表格类型徽标：基础 / 专业（悬停能看到容量与保留期口径） */}
+          <span className={`kind-tag ${detail.kind}`} title={tableKindCapacityText(detail.kind)}>
+            {kindMeta.shortLabel}
+          </span>
           <span className="spacer" />
-          <span className="small muted">{members.length} 位成员 · {total} 条记录</span>
+          <span className="small muted">{members.length} 位成员 · {total} 条记录 · {properties.length}/{kindMeta.maxProperties} 列</span>
           {isOwner ? (
             <button type="button" className="btn ghost small danger" onClick={() => void deleteDatabase()}>
               删除表格
@@ -1002,7 +1009,6 @@ export function DatabasePage({
           properties={properties}
           users={users}
           canEdit={viewEditable}
-          canUnlock={canEditStructure}
           canManage={isOwner && !viewScoped}
           total={total}
           rowCount={filtered.length}
@@ -1014,11 +1020,12 @@ export function DatabasePage({
           onRenameView={renameView}
           onDeleteView={(id) => void deleteView(id)}
           onUpdateConfig={updateActiveConfig}
-          onLockView={lockView}
           onShareView={(id) => {
             setShareViewId(id);
             setShareOpen(true);
           }}
+          canAddView={canAddView}
+          addViewHint={addViewHint}
         />
       ) : null}
 

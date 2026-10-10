@@ -1,4 +1,4 @@
--- Qafield - 多人协作的增量同步日志（D1 / SQLite）
+-- Varysheet - 多人协作的增量同步日志（D1 / SQLite）
 -- Applied with:  npx wrangler d1 migrations apply cloudnotion-db --local|--remote
 --
 -- 每一次改动（改单元格 / 增删记录 / 新增备注 / 改字段与视图结构）都往这里**追加**一条，

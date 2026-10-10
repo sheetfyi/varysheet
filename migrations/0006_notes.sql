@@ -1,4 +1,4 @@
--- Qafield - 记录备注（评论）+ @提醒私信
+-- Varysheet - 记录备注（评论）+ @提醒私信
 -- Applied with:  npx wrangler d1 migrations apply cloudnotion-db --local|--remote
 
 -- 记录上的备注：只能新增，不能修改 / 删除

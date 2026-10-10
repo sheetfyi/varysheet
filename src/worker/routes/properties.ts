@@ -1,14 +1,17 @@
 /** /api/properties* - user defined fields (name, type, config, order, width). */
 import { FIELD_META, normalizeCellValue } from '../../shared/fields';
+import { TABLE_LIMIT_EXCEEDED, tableKindMeta } from '../../shared/tableKind';
 import type { FieldType, PropertyConfig, RowValues, SelectOption } from '../../shared/types';
 import { accessForProperty, assertStructureEditable, requireDatabaseAccess } from '../access';
 import { requireUser } from '../auth';
+import { loadDatabaseKind } from '../capacity';
 import { logChanges } from '../changes';
 import {
   asEnum,
   asNumberValue,
   asString,
   badRequest,
+  forbidden,
   json,
   newId,
   notFound,
@@ -139,10 +142,30 @@ async function nextPosition(ctx: RequestContext, databaseId: string): Promise<nu
   return sqlNumber(row ?? {}, 'max_position', 0) + 1000;
 }
 
+/** 现有字段（列）数：列数上限的判断用 */
+async function countProperties(ctx: RequestContext, databaseId: string): Promise<number> {
+  const row = await ctx.env.DB.prepare('SELECT COUNT(*) AS total FROM properties WHERE database_id = ?')
+    .bind(databaseId)
+    .first<SqlRow>();
+  return sqlNumber(row ?? {}, 'total');
+}
+
 async function createPropertyHandler(ctx: RequestContext): Promise<Response> {
   const user = await requireUser(ctx.request, ctx.env);
   const access = await requireDatabaseAccess(ctx.env, ctx.params.id, user, 'edit');
   assertStructureEditable(access);
+
+  // 列数上限：基础表格最多 10 列、专业表格 20 列（只拦新增 —— 已经超限的老表
+  // 仍然能改名 / 改类型 / 删列，不然用户没法把它收拾回上限以内）
+  const meta = tableKindMeta(await loadDatabaseKind(ctx.env, ctx.params.id));
+  const columns = await countProperties(ctx, ctx.params.id);
+  if (columns >= meta.maxProperties) {
+    throw forbidden(
+      `${meta.label}最多 ${meta.maxProperties} 列（当前 ${columns} 列）：删掉一些字段后再添加，或换成专业表格`,
+      TABLE_LIMIT_EXCEEDED,
+    );
+  }
+
   const body = await readJson(ctx.request);
 
   const name = asString(body.name, '字段名称', { required: true, max: 120 });

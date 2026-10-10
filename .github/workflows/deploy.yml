@@ -1,4 +1,4 @@
-# Qafield 持续集成 + 自动部署
+# Varysheet 持续集成 + 自动部署
 #
 # 触发方式
 #   - push 到 main      -> 校验 -> 端到端冒烟测试 -> 自动部署到 Cloudflare Workers -> 线上冒烟测试
@@ -10,7 +10,7 @@
 #   CLOUDFLARE_ACCOUNT_ID  必需。Cloudflare 账户 ID
 #   D1_DATABASE_ID         可选。提供后会替换 wrangler.jsonc 里的占位 database_id
 #   RESEND_API_KEY         可选。Resend 发信密钥（注册确认码 / 重置密码通知邮件）
-#   RESEND_FROM_EMAIL      可选。发件人，默认 Qafield <onboarding@resend.dev>
+#   RESEND_FROM_EMAIL      可选。发件人，默认 Varysheet <admin@varysheet.com>
 #   ADMIN_EMAIL            可选。超级管理员邮箱，登录时自动创建 / 提升该账号
 #   ADMIN_PASSWORD         可选。管理员首次创建时用的密码（8 位以上，含字母与数字）
 #
@@ -209,10 +209,22 @@ jobs:
       - name: 确保 R2 存储桶存在
         if: steps.creds.outputs.ready == 'true'
         run: |
-          set -euo pipefail
-          npx wrangler r2 bucket create cloudnotion-files 2>&1 | tee /tmp/r2.log || {
-            grep -qi 'already exists' /tmp/r2.log && echo "R2 桶 cloudnotion-files 已存在" || { cat /tmp/r2.log; exit 1; }
-          }
+          if npx wrangler r2 bucket create cloudnotion-files 2>&1 | tee /tmp/r2.log; then
+            echo "R2 桶 cloudnotion-files 已就绪"
+            exit 0
+          fi
+          if grep -qi 'already exists' /tmp/r2.log; then
+            echo "R2 桶 cloudnotion-files 已存在，跳过创建"
+            exit 0
+          fi
+          if grep -q '10042' /tmp/r2.log; then
+            echo "::error title=R2 未开通::该账户还没启用 R2。请先在 Cloudflare 控制台 Storage & Databases -> R2 Object Storage 完成开通（需绑定付款方式），再给 API Token 补上 Account > Workers R2 Storage > Edit，然后重跑（见 DEPLOY.md 6.1）"
+          elif grep -qE 'Authentication error|10000|9109|Unauthorized' /tmp/r2.log; then
+            echo "::error title=R2 权限不足::当前 CLOUDFLARE_API_TOKEN 缺少 Account > Workers R2 Storage > Edit 权限（见 DEPLOY.md 6.1）"
+          else
+            echo "::error title=R2 桶创建失败::详见上方日志"
+          fi
+          exit 1
 
       - name: 应用远程 D1 迁移
         if: steps.creds.outputs.ready == 'true' && inputs.skip_migrations != 'true'
@@ -239,11 +251,20 @@ jobs:
         if: steps.creds.outputs.ready == 'true'
         run: |
           set -euo pipefail
-          npx wrangler deploy 2>&1 | tee /tmp/deploy.log
+          if ! npx wrangler deploy 2>&1 | tee /tmp/deploy.log; then
+            if grep -q '10181' /tmp/deploy.log; then
+              echo "::error title=D1 数据库不存在::wrangler.jsonc 的 database_id（或 Secrets.D1_DATABASE_ID）不属于本账户。先 npx wrangler d1 create cloudnotion-db 建库、把返回的 id 回填到 wrangler.jsonc（或存成 D1_DATABASE_ID Secret）后重跑，见 DEPLOY.md 6.2"
+            elif grep -qE 'Authentication error|10000|9109|Unauthorized' /tmp/deploy.log; then
+              echo "::error title=部署权限不足::当前 CLOUDFLARE_API_TOKEN 缺少 Account > Workers Scripts > Edit 权限（见 DEPLOY.md 6.1）"
+            else
+              echo "::error title=部署失败::详见上方日志"
+            fi
+            exit 1
+          fi
           url="$(grep -Eo 'https://[a-zA-Z0-9._-]+\.workers\.dev' /tmp/deploy.log | tail -n 1 || true)"
           echo "url=${url}" >> "$GITHUB_OUTPUT"
           {
-            echo "### Qafield 部署完成 🚀"
+            echo "### Varysheet 部署完成 🚀"
             echo ""
             echo "- 线上地址：${url:-见本次运行日志}"
             echo "- Commit：\`${GITHUB_SHA:0:7}\`"

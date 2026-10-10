@@ -1,22 +1,31 @@
 /**
- * View tabs + the view level toolbar (设置 / 分享 / ⋯).
+ * View tabs + the view level toolbar (分享 / ⋯)。
+ *
+ * 视图设置（行高 / 卡片大小 / 卡片预览字段 / 显示的字段）原来挂在最右边独立的
+ * 「设置」按钮上，现在整体合并进「⋯」菜单，右侧只剩「分享」和「⋯」；同时下线了
+ * 三个入口：
+ *   - 「分组依据」：老视图里已保存的 `groupBy` 照旧渲染（看板列 / 表格分组都还有
+ *     数据来自示例数据与历史数据），只是不再提供修改入口；
+ *   - 「锁定视图」：视图锁定整体下线 —— 「⋯」里的锁定项与「＋ 新建视图」表单里的
+ *     「锁定该视图」勾选都已移除。服务端 `views.is_locked` 仍然保留（拦截改名 /
+ *     删除，兼容老数据），客户端只保留「🔒 视图已锁定」提示；
+ *   - 「分享此视图」：与右侧「分享」按钮重复，统一走「分享」。
+ *
  * Filter conditions are edited from the "＋ 新建筛选" button rendered above the
  * view body (see DatabasePage) and from the "＋ 新建视图" form below.
  */
 import { useState } from 'react';
-import { FIELD_META } from '../../shared/fields';
 import { VIEW_TYPE_LABEL } from '../../shared/views';
 import type { Filters, Property, ViewConfig, ViewDef, ViewType } from '../../shared/types';
 import { FilterPanel, emptyFilters, type FilterUserNames } from './FilterPanel';
 import { Popover } from './Popover';
 
-/** Payload of the "＋ 新建视图" form: 自定义名称 / 筛选 / 锁定 / 定向分享. */
+/** Payload of the "＋ 新建视图" form: 自定义名称 / 筛选 / 定向分享. */
 export interface NewViewInput {
   /** 恒为 'table'：UI 上不再让用户选视图类型（见 NEW_VIEW_TYPE） */
   type: ViewType;
   name: string;
   filters: Filters;
-  locked: boolean;
   /** 定向分享（可选）：role = 'editor' 时可以额外勾选「限制编辑」 */
   share?: { email: string; role: 'editor' | 'viewer'; limitEdits?: boolean };
 }
@@ -29,8 +38,6 @@ interface ViewBarProps {
   users?: FilterUserNames;
   /** the active view may be renamed / reconfigured / deleted (false once locked) */
   canEdit: boolean;
-  /** may lock / unlock the active view (owner or editor of an unlocked table) */
-  canUnlock: boolean;
   /** owner only actions: 该视图的定向分享 */
   canManage: boolean;
   total: number;
@@ -40,8 +47,11 @@ interface ViewBarProps {
   onRenameView: (id: string, name: string) => void;
   onDeleteView: (id: string) => void;
   onUpdateConfig: (patch: Partial<ViewConfig>) => void;
-  onLockView: (id: string, locked: boolean) => void;
   onShareView: (id: string) => void;
+  /** 还能不能再加视图（基础表格 3 个 / 专业表格 10 个）：到上限时「＋」置灰 */
+  canAddView: boolean;
+  /** 「＋」置灰时的悬停说明（写清当前上限与怎么恢复） */
+  addViewHint: string;
 }
 
 const VIEW_ICON: Record<ViewType, string> = { table: '▤', board: '▥', gallery: '▦' };
@@ -49,6 +59,7 @@ const VIEW_ICON: Record<ViewType, string> = { table: '▤', board: '▥', galler
 /** 新建视图固定为表格类型：表单里不再提供类型选择，避免误建看板 / 画廊视图 */
 const NEW_VIEW_TYPE: ViewType = 'table';
 
+/** 视图设置面板：行高 / 卡片大小 / 卡片预览字段 / 显示的字段。渲染在「⋯」菜单里。 */
 function SettingsPanel({
   view,
   properties,
@@ -60,7 +71,6 @@ function SettingsPanel({
   canEdit: boolean;
   onChange: (patch: Partial<ViewConfig>) => void;
 }) {
-  const groupable = properties.filter((property) => FIELD_META[property.type].groupable);
   const visible = view.config.visibleProperties;
 
   const toggleVisible = (id: string) => {
@@ -71,23 +81,6 @@ function SettingsPanel({
 
   return (
     <div>
-      <label className="field">
-        <span>分组依据</span>
-        <select
-          className="input"
-          value={view.config.groupBy ?? ''}
-          disabled={!canEdit}
-          onChange={(event) => onChange({ groupBy: event.target.value || null })}
-        >
-          <option value="">不分组</option>
-          {groupable.map((property) => (
-            <option key={property.id} value={property.id}>
-              {property.name}
-            </option>
-          ))}
-        </select>
-      </label>
-
       {view.type === 'gallery' ? (
         <label className="field">
           <span>卡片大小</span>
@@ -167,7 +160,7 @@ function SettingsPanel({
   );
 }
 
-/** "＋ 新建视图" form: name, conditions, lock and optional view share. 类型固定为表格。 */
+/** "＋ 新建视图" form: name, conditions and optional view share. 类型固定为表格。 */
 function NewViewForm({
   properties,
   users,
@@ -184,7 +177,6 @@ function NewViewForm({
 }) {
   const [name, setName] = useState('');
   const [filters, setFilters] = useState<Filters>(emptyFilters);
-  const [locked, setLocked] = useState(false);
   const [email, setEmail] = useState('');
   const [role, setRole] = useState<'editor' | 'viewer'>('viewer');
   /** 「限制编辑」：只随「可编辑」的定向分享一起提交 */
@@ -215,11 +207,6 @@ function NewViewForm({
       </div>
 
       <FilterPanel properties={properties} users={users} filters={filters} canEdit onChange={setFilters} />
-
-      <label className="row gap" style={{ marginTop: 8 }}>
-        <input type="checkbox" checked={locked} onChange={(event) => setLocked(event.target.checked)} />
-        <span>锁定该视图（锁定后不可重命名、改配置或删除）</span>
-      </label>
 
       {canShare ? (
         <>
@@ -267,7 +254,6 @@ function NewViewForm({
               type: NEW_VIEW_TYPE,
               name: name.trim(),
               filters,
-              locked,
               share: canShare && email.trim() ? { email: email.trim(), role, limitEdits: role === 'editor' && limitEdits } : undefined,
             })
           }
@@ -288,7 +274,6 @@ export function ViewBar({
   properties,
   users = {},
   canEdit,
-  canUnlock,
   canManage,
   total,
   rowCount,
@@ -297,8 +282,9 @@ export function ViewBar({
   onRenameView,
   onDeleteView,
   onUpdateConfig,
-  onLockView,
   onShareView,
+  canAddView,
+  addViewHint,
 }: ViewBarProps) {
   const [draftName, setDraftName] = useState(active.name);
   const filterCount = active.config.filters?.conditions.length ?? 0;
@@ -321,7 +307,12 @@ export function ViewBar({
         </button>
       ))}
 
-      <Popover label="＋" title="新建视图" panelWidth={560} disabled={!canEdit}>
+      <Popover
+        label="＋"
+        title={canAddView ? '新建视图' : addViewHint}
+        panelWidth={560}
+        disabled={!canEdit || !canAddView}
+      >
         {(close) => (
           <NewViewForm
             properties={properties}
@@ -337,8 +328,9 @@ export function ViewBar({
       </Popover>
 
       <span className="spacer" />
+      {/* 老数据里被锁定的视图：锁定入口已下线，服务端仍会拦改名 / 删除，这里只做提示 */}
       {active.locked ? (
-        <span className="badge" title="视图已锁定：名称、筛选与删除均不可修改，可在 ⋯ 中解锁">
+        <span className="badge" title="视图已锁定（历史数据）：名称、设置与删除均不可修改">
           🔒 视图已锁定
         </span>
       ) : null}
@@ -346,10 +338,6 @@ export function ViewBar({
         {rowCount === total ? `${total} 条记录` : `显示 ${rowCount} / 共 ${total} 条`}
         {filterCount ? ` · 筛选 ${filterCount}` : ''}
       </span>
-
-      <Popover label="设置" wide disabled={!canEdit}>
-        {() => <SettingsPanel view={active} properties={properties} canEdit={canEdit} onChange={onUpdateConfig} />}
-      </Popover>
 
       {canManage ? (
         <button
@@ -362,72 +350,52 @@ export function ViewBar({
         </button>
       ) : null}
 
-      {canEdit || (active.locked && canUnlock) ? (
-        <Popover label="⋯" title={active.locked ? '当前视图（已锁定）' : '当前视图'}>
+      {/* 最右边的「⋯」：重命名 + 视图设置（原来独立的「设置」按钮已合并进来）+ 删除 */}
+      {canEdit ? (
+        <Popover label="⋯" title="当前视图" wide>
           {(close) => (
             <div>
-              {canEdit ? (
-                <>
-                  <div className="menu-label">重命名视图</div>
-                  <div className="row gap" style={{ padding: '0 8px 8px' }}>
-                    <input
-                      className="input"
-                      value={draftName}
-                      onChange={(event) => setDraftName(event.target.value)}
-                    />
-                    <button
-                      type="button"
-                      className="btn small"
-                      onClick={() => {
-                        const name = draftName.trim();
-                        if (name && name !== active.name) onRenameView(active.id, name);
-                        close();
-                      }}
-                    >
-                      保存
-                    </button>
-                  </div>
-                </>
-              ) : (
-                <div className="menu-label">视图已锁定，解锁后才能改名、调整筛选或删除</div>
-              )}
+              <div className="menu-label">重命名视图</div>
+              <div className="row gap" style={{ padding: '0 8px 8px' }}>
+                <input
+                  className="input"
+                  value={draftName}
+                  onChange={(event) => setDraftName(event.target.value)}
+                />
+                <button
+                  type="button"
+                  className="btn small"
+                  onClick={() => {
+                    const name = draftName.trim();
+                    if (name && name !== active.name) onRenameView(active.id, name);
+                    close();
+                  }}
+                >
+                  保存
+                </button>
+              </div>
+
+              <div className="menu-label">视图设置</div>
+              <div style={{ padding: '0 8px 8px' }}>
+                <SettingsPanel
+                  view={active}
+                  properties={properties}
+                  canEdit={canEdit}
+                  onChange={onUpdateConfig}
+                />
+              </div>
+
               <button
                 type="button"
-                className="menu-item"
-                disabled={!canUnlock}
+                className="menu-item danger"
+                disabled={views.length <= 1}
                 onClick={() => {
-                  if (!canUnlock) return;
-                  onLockView(active.id, !active.locked);
+                  if (views.length > 1) onDeleteView(active.id);
                   close();
                 }}
               >
-                {active.locked ? '🔓 解锁视图' : '🔒 锁定视图'}
+                🗑 删除此视图
               </button>
-              {canManage ? (
-                <button
-                  type="button"
-                  className="menu-item"
-                  onClick={() => {
-                    onShareView(active.id);
-                    close();
-                  }}
-                >
-                  🔗 分享此视图
-                </button>
-              ) : null}
-              {canEdit ? (
-                <button
-                  type="button"
-                  className="menu-item danger"
-                  disabled={views.length <= 1}
-                  onClick={() => {
-                    if (views.length > 1) onDeleteView(active.id);
-                    close();
-                  }}
-                >
-                  🗑 删除此视图
-                </button>
-              ) : null}
             </div>
           )}
         </Popover>
@@ -435,6 +403,3 @@ export function ViewBar({
     </div>
   );
 }
-
-
-

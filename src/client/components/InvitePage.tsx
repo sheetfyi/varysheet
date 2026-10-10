@@ -93,6 +93,7 @@ export function InvitePage({ token, onAuthenticated, onGoToLogin }: InvitePagePr
   return (
     <div className="centered">
       <form className="auth-card" onSubmit={submit}>
+        {detail.siteIconUrl ? <img className="auth-logo" src={detail.siteIconUrl} alt="" /> : null}
         <h1>{detail.appName}</h1>
         <p className="muted">
           {detail.inviterName || '有人'}把「{detail.databaseName}」的视图「{detail.viewName}」分享给你，

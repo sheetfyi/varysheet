@@ -1,9 +1,11 @@
 /**
  * 超级管理员账号的引导 + 用户列表查询。
  *
- * 管理员从环境变量来（`ADMIN_EMAIL` / `ADMIN_PASSWORD`），启动阶段不需要任何初始化动作：
- * 每次登录（以及带会话的 /api/session）都会调一次 `ensureAdminUser`，每个 isolate 只真正跑一次。
- *   - `ADMIN_EMAIL` 指定的账号不存在 → 用 `ADMIN_PASSWORD` 直接创建（已带 `is_admin = 1`）；
+ * 管理员邮箱来自后台「站点设置」（`settings.admin_email`）或环境变量（`ADMIN_EMAIL`），
+ * 两者都没有时用默认的 `admin@varysheet.com`（见 worker/settings.ts 的 DEFAULT_ADMIN_EMAIL）。
+ * 启动阶段不需要任何初始化动作：每次登录（以及带会话的 /api/session）都会调一次
+ * `ensureAdminUser`，每个 isolate 只真正跑一次。
+ *   - 该邮箱的账号不存在 → 用 `ADMIN_PASSWORD` 直接创建（已带 `is_admin = 1`）；
  *   - 已存在 → 提升为管理员；
  *   - `ADMIN_RESET_PASSWORD=true` 时用 `ADMIN_PASSWORD` 覆盖密码（改完记得去掉这个变量）。
  *
@@ -11,31 +13,35 @@
  */
 import { hashPassword, validatePasswordStrength, verifyPassword } from './auth';
 import { EMAIL_PATTERN, newId, sqlNullableNumber, sqlNumber, sqlString, type SqlRow } from './http';
+import { DEFAULT_ADMIN_EMAIL } from './settings';
 import type { AdminUser } from '../shared/types';
 import type { Env } from './types';
 
 /** 用户列表一次最多返回多少条 */
 const MAX_PAGE_SIZE = 100;
 
-/** 环境变量里配置的管理员邮箱（不合法就当没配）。 */
-export function adminEmailFrom(env: Env): string | null {
-  const email = (env.ADMIN_EMAIL ?? '').trim().toLowerCase();
-  return email && EMAIL_PATTERN.test(email) ? email : null;
+/**
+ * 生效的管理员邮箱：优先用调用方传来的（后台里改过的设置），
+ * 其次环境变量 `ADMIN_EMAIL`，最后默认 `admin@varysheet.com`（不合法就当没配）。
+ */
+export function adminEmailFrom(env: Env, override?: string): string | null {
+  const email = (override ?? env.ADMIN_EMAIL ?? '').trim().toLowerCase() || DEFAULT_ADMIN_EMAIL;
+  return EMAIL_PATTERN.test(email) ? email : null;
 }
 
 let bootstrap: { email: string; promise: Promise<void> } | null = null;
 
-/** 让 `ADMIN_EMAIL` 指定的账号成为管理员（幂等；失败只记日志，不影响正常登录）。 */
-export function ensureAdminUser(env: Env): Promise<void> {
-  const email = adminEmailFrom(env);
-  if (!email) return Promise.resolve();
-  if (bootstrap?.email === email) return bootstrap.promise;
+/** 让配置的管理员邮箱对应的账号成为管理员（幂等；失败只记日志，不影响正常登录）。 */
+export function ensureAdminUser(env: Env, email?: string): Promise<void> {
+  const resolved = adminEmailFrom(env, email);
+  if (!resolved) return Promise.resolve();
+  if (bootstrap?.email === resolved) return bootstrap.promise;
 
-  const promise = bootstrapAdmin(env, email).catch((error) => {
+  const promise = bootstrapAdmin(env, resolved).catch((error) => {
     console.error('管理员账号引导失败:', error);
-    if (bootstrap?.email === email) bootstrap = null; // 下次请求再试
+    if (bootstrap?.email === resolved) bootstrap = null; // 下次请求再试
   });
-  bootstrap = { email, promise };
+  bootstrap = { email: resolved, promise };
   return promise;
 }
 

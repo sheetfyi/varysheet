@@ -1,4 +1,4 @@
-/* Qafield client styles - plain CSS, no build-time dependencies. */
+/* Varysheet client styles - plain CSS, no build-time dependencies. */
 :root {
   --bg: #ffffff;
   --bg-soft: #f7f7f5;
@@ -443,6 +443,42 @@ textarea.input {
   margin-bottom: 0;
 }
 
+/* 「专业表格可添加 N 个」那一行：跟在基础表格名额下面，弱化一点 */
+.quota-pro-line {
+  display: flex;
+  align-items: center;
+  margin: 4px 0 0;
+  color: var(--text-soft);
+}
+
+/* 「表格数量说明」弹窗里的类型对比表：容量 / 存储时间 / 列数 / 视图数 */
+.quota-kind-table {
+  width: 100%;
+  margin-bottom: 12px;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.quota-kind-table th,
+.quota-kind-table td {
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.quota-kind-table thead th {
+  background: var(--bg-soft);
+  color: var(--text-soft);
+  font-weight: 600;
+}
+
+.quota-kind-table tbody th {
+  color: var(--text-soft);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
 .sidebar-foot {
   border-top: 1px solid var(--border);
   padding: 8px;
@@ -603,17 +639,25 @@ textarea.input {
   color: var(--capacity-danger);
 }
 
-.capacity-pop-foot {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px solid var(--border);
+/* 表格类型徽标：基础 / 专业（侧边栏列表、容量浮层标题都用它） */
+.kind-tag {
+  flex: none;
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-soft);
+  color: var(--text-faint);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 15px;
+  white-space: nowrap;
 }
 
-.capacity-pop-foot .capacity-pop-note {
-  margin: 0;
+/* 专业表格稍微突出一点：容量与存储时间都不限 */
+.kind-tag.pro {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 /* 表格页 / 公开链接页顶部的提示条：已到上限，只能查看和查询 */
@@ -750,6 +794,35 @@ textarea.input {
 
 .grid td.cell {
   padding: 0 2px;
+}
+
+/*
+ * 单元格不许「按内容顶宽」——链接 / 长文本字段把整列（乃至整张表）撑开就是这个原因，
+ * 改之前先读：
+ *
+ * 表格是 `table-layout: fixed` + <colgroup> 定宽，本来列宽只该由 colgroup 说了算。
+ * 但表格宽度是 auto（.grid 的 `min-width: 100%` 被行内的 minWidth 覆盖），Chrome 仍然会
+ * 拿每个单元格的 **min-content 贡献** 去算列宽：只要有一格装着「不肯收缩」的长文本
+ * （没有空格的长网址最典型；中文能逐字断行，所以中文长句反而没事），那一列就被顶宽、
+ * 其它列被挤窄，整张表还会被顶出容器、出现横向滚动。
+ *
+ * 表头同样会顶宽列（很长、又没有空格的英文字段名，见 case=linkfix 的
+ * 「ClaraInstagramProfileLinkAddress」实测：那一列被顶到 237px，配置里写的是 160px），
+ * 所以 td 与 th 都要压住。加 `max-width: 0` 之后，单元格对列宽的贡献变成 0，列宽重新
+ * 完全由 <colgroup> 决定。三点注意：
+ *   - 单元格实际渲染宽度仍然是列宽（max-width 只压 min-content 贡献，不会真的把格子
+ *     设成 0 宽），所以 .cell-text 的省略号、.cell-open-btn 的绝对定位、表头的 ▾ 菜单
+ *     都照旧；
+ *   - 行首方框列写的是 `min-width: 44px`（min-width 优先于 max-width），不受影响；
+ *   - 只压「内容撑宽」，不会让表格变宽：列宽合计本来就窄于容器时，表格依旧是那一列之和
+ *     （改之前也是这样），只是再也不会被内容顶宽。
+ *
+ * 复现 / 验证：tools/mobile-check 探针 probe-link2.html 里没有这条规则时，链接格会把
+ * 表格从 colgroup 的 394px 顶到 978px（= 容器宽），加上之后回到 394px 并画「…」。
+ */
+.grid td.cell-view-cell,
+.grid thead th {
+  max-width: 0;
 }
 
 .grid thead th .head {
@@ -2140,5 +2213,79 @@ textarea.input {
   background: var(--accent-soft);
   color: #17509a;
 }
+
+/* ------------------------------------------------ 品牌标识 + 站点设置 */
+
+/* 站点图标：跟在站点名称前面（侧边栏、顶部条、登录页、后台预览共用） */
+.brand-icon {
+  width: 1.15em;
+  height: 1.15em;
+  margin-right: 6px;
+  border-radius: 4px;
+  object-fit: contain;
+  vertical-align: -0.18em; /* 与文字基线对齐 */
+}
+
+/* 后台「站点设置」里的大号预览图 */
+.large-icon {
+  width: 32px;
+  height: 32px;
+  margin-right: 0;
+}
+
+/* 登录 / 注册 / 邀请卡片顶部的大图标 */
+.auth-logo {
+  display: block;
+  width: 44px;
+  height: 44px;
+  margin: 0 0 10px;
+  border-radius: 10px;
+  object-fit: contain;
+}
+
+/* 站点设置卡片：比 .card 更「表单」，所以不沿用它的手型光标 */
+.settings-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-sunken);
+  box-shadow: 0 1px 2px rgba(15, 15, 15, 0.06);
+}
+
+.settings-head {
+  align-items: center;
+  font-size: 15px;
+}
+
+.settings-form {
+  display: flex;
+  flex-direction: column;
+}
+
+/* 表单里的说明文字紧跟输入框，稍微收一点间距 */
+.settings-form .field {
+  margin-bottom: 10px;
+}
+
+.settings-form .field > .small {
+  line-height: 1.5;
+}
+
+.settings-actions {
+  align-items: center;
+  margin-top: 4px;
+}
+
+/* 文件选择框在窄屏上会撑破卡片 */
+.icon-file {
+  min-width: 0;
+  max-width: 100%;
+  font-size: 12px;
+}
+
 
 

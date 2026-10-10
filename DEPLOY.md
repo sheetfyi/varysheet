@@ -3,8 +3,9 @@
 ## 0. 前置条件
 
 - Node.js 20+，`npm install` 已完成
-- 已登录 Cloudflare：`npx wrangler login`
-- 账号需可创建 Workers / D1 / R2 资源
+- 已登录 Cloudflare：`npx wrangler login`（CI / 脚本里改用 `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` 两个环境变量）
+- 账号需可创建 Workers / D1 / R2 资源；**R2 必须先在控制台开通**（Cloudflare 控制台 → Storage & Databases → R2 Object Storage → 开通，需绑定付款方式）。没开通时 `npx wrangler r2 bucket create` 会报 `Please enable R2 through the Cloudflare Dashboard [code: 10042]`，附件上传也就没法工作
+- API Token 至少要有 `Account · Workers Scripts · Edit` + `Account · D1 · Edit` + `Account · Workers R2 Storage · Edit` + `Account · Account Settings · Read`（清单与排查见 [6.1](#61-一次性配置-secrets)）
 
 ## 1. 创建 D1 数据库并回填 `database_id`
 
@@ -54,14 +55,21 @@ npm run deploy                 # vite build && wrangler deploy
 部署成功后会得到 `https://cloudnotion.<your-subdomain>.workers.dev`（`workers_dev: true`）。
 自定义域名：在 Cloudflare 控制台为 Worker 添加 Custom Domain，或在 `wrangler.jsonc` 增加 `routes`。
 
+> **定时任务**：`wrangler deploy` 会一并注册 `wrangler.jsonc` 里的 `triggers.crons`
+> （每天 03:00 UTC 跑一次基础表格的保留期清理，见 `src/worker/retention.ts`）。
+> 本地用 `npx wrangler dev --test-scheduled` + `curl "http://127.0.0.1:8787/__scheduled?cron=0+3+*+*+*"`
+> 可以手动触发；线上等不及也可以直接调管理员接口
+> `POST /api/admin/maintenance/retention`（返回清掉的记录 / 附件数量）。
+
 ### 可选环境变量（`wrangler.jsonc` → `vars`）
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
-| `APP_NAME` | `Qafield` | 站点名称：前端标题 / 邮件标题 / 健康检查返回的名称 |
+| `APP_NAME` | `Varysheet` | 站点名称：前端标题 / favicon / 邮件标题 / 健康检查返回的名称。后台「站点设置」里改过的值优先于它 |
 | `MAX_UPLOAD_MB` | `25` | 单文件上传上限（MB） |
-| `MAX_DATABASE_RECORDS` | `500` | **单表**记录数上限。到上限后只拦「增长」：新建 / 批量新建 / 复制记录一律 `403 capacity_exceeded`，而查看、查询、改已有记录、删记录都不受影响（删掉一些立刻又能新建，见 [README 功能表](./README.md)） |
-| `MAX_DATABASE_STORAGE_MB` | `1024` | **单表**附件合计上限（MB，默认 1GB）。附件上传超过这个总量、或表格已经满员时同样返回 `403 capacity_exceeded`；侧边栏每张表后面的硬盘图标（💾，点开有明细浮层）显示的就是这两项用量 |
+| `MAX_DATABASE_RECORDS` | `500` | **基础表格**的记录数上限（专业表格不限）。到上限后只拦「增长」：新建 / 批量新建 / 复制记录一律 `403 capacity_exceeded`，而查看、查询、改已有记录、删记录都不受影响（删掉一些立刻又能新建，见 [README 功能表](./README.md)） |
+| `MAX_DATABASE_STORAGE_MB` | `1024` | **基础表格**的附件合计上限（MB，默认 1GB；专业表格不限）。附件上传超过这个总量、或表格已经满员时同样返回 `403 capacity_exceeded`；侧边栏每张表后面的硬盘图标（💾，点开有明细浮层）显示的就是这两项用量 |
+| `BASIC_TABLE_RETENTION_DAYS` | `365` | **基础表格**的数据保留期（天）：超过这个时间的记录与附件（含 R2 对象）由定时任务自动清除（`triggers.crons` 每天 03:00 UTC；管理员也可以手动 `POST /api/admin/maintenance/retention`）。专业表格永久保留；设成 `0` 关闭自动清理（只建议本地调试） |
 | `ALLOW_SIGNUP` | `true` | 设为 `"false"` 关闭公开注册（已有账号仍可登录） |
 | `AUTH_CODE_TTL_MINUTES` | `15` | 注册邮箱确认码有效期（分钟） |
 | `AUTH_ECHO_CODE_DOMAINS` | `example.com,example.org,example.net` | 收件人域命中白名单时确认码**不发信**、直接回显在响应里（`devCode`）。这些都是永远收不到邮件的保留测试域，所以不会削弱真实邮箱的验证强度；另外只要没配 `RESEND_API_KEY`，任何邮箱都回显 |
@@ -72,9 +80,9 @@ npm run deploy                 # vite build && wrangler deploy
 ## 5. 部署后验证
 
 ```bash
-# 冒烟测试（246 项断言，覆盖两步注册/登录/建表/记录/视图/分享/成员/附件/单表容量/表格名额/改密码/用户管理/会话兜底）
+# 冒烟测试（259 项断言，覆盖两步注册/登录/建表/记录/视图/分享/成员/附件/单表容量/表格类型与名额/改密码/用户管理/会话兜底）
 # 线上跑同一套断言：唯一会改密码的「重置自己密码」只对 @example.* 测试管理员执行，
-# 真实 ADMIN_EMAIL 会自动跳过那 2 项（结果 244/244），不会重置你的密码、也不会踢你下线
+# 真实 ADMIN_EMAIL 会自动跳过那 2 项（结果 257/257），不会重置你的密码、也不会踢你下线
 BASE_URL=https://cloudnotion.<your-subdomain>.workers.dev node scripts/smoke-test.mjs
 
 # 路由自检
@@ -126,8 +134,8 @@ npm run check:routes
 | `CLOUDFLARE_ACCOUNT_ID` | ✅ | `npx wrangler whoami` 里的 Account ID |
 | `D1_DATABASE_ID` | ➖ | 可选。填了就不必把真实 id 提交进 `wrangler.jsonc`，工作流会自动替换占位符 |
 | `RESEND_API_KEY` | ➖ | Resend 发信密钥（注册确认码、重置密码通知）。不配则确认码回显，仅适合测试 |
-| `RESEND_FROM_EMAIL` | ➖ | 发件人，默认 `Qafield <onboarding@resend.dev>` |
-| `ADMIN_EMAIL` | ➖ | 超级管理员邮箱，登录时自动创建 / 提升该账号 |
+| `RESEND_FROM_EMAIL` | ➖ | 发件人，默认 `Varysheet <admin@varysheet.com>` |
+| `ADMIN_EMAIL` | ➖ | 超级管理员邮箱，登录时自动创建 / 提升该账号；默认 `admin@varysheet.com` |
 | `ADMIN_PASSWORD` | ➖ | 管理员首次创建时用的密码（8 位以上、含字母与数字） |
 
 后 4 个可选 Secret 会在 `deploy` 阶段（部署成功之后）由 `wrangler secret put` 自动写入 Worker，未配置就跳过；
@@ -141,13 +149,17 @@ npm run check:routes
 - Account · Workers R2 Storage · Edit
 - Account · Account Settings · Read
 
+（`User · Memberships · Read` 是可选的：只影响 `wrangler whoami` 能不能打印成员角色，缺了只会多一行 warning，与部署无关；同理，用 Account API Token 时 `wrangler whoami` 提示 `Unable to get membership roles` 可以直接忽略。）
+
 未配置 `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` 时，`deploy` job 会输出 warning 并**跳过部署**（校验与冒烟测试照常跑），流水线不会变红。
 
 > ⚠️ 若日志在「应用远程 D1 迁移」步骤报 `Authentication error [code: 10000]`，说明 Token 少了 `Account · D1 · Edit`——缺这个权限时连 `npx wrangler d1 list` 都会返回 401（工作流现在会对这种失败输出专门的错误提示，不会只丢一段原始日志）。
+>
+> 其余常见报错都会被工作流翻译成可读的 `::error title=...`：`[code: 10042]` = 账户还没开通 R2（见第 0 节）；`D1 binding 'DB' references database '...' which was not found [code: 10181]` = `wrangler.jsonc` 里的 `database_id` 不属于本账户（见 6.2）；`[code: 10007] This Worker does not exist on your account` 只在 `wrangler deployments list` 里出现，意思是这个名字的 Worker 还没建过，属正常现象。
 
 ### 6.2 首次部署前必须做的一步
 
-`wrangler.jsonc` 的 `database_id` 还是占位符时，流水线会在 `deploy` 阶段以清晰错误停下。二选一：
+`wrangler.jsonc` 的 `database_id` 还是占位符、或填的是**别的账户**下的 id 时，流水线会在 `deploy` 阶段以清晰错误停下（`10181 ... which was not found`）。二选一：
 
 ```bash
 # 方案 A：本地创建后回填 wrangler.jsonc 并提交
@@ -169,7 +181,7 @@ Actions → Deploy → Run workflow，可勾选：
 ### 6.4 状态徽章
 
 ```md
-![Deploy](https://github.com/Archdalehome/cloudnotion/actions/workflows/deploy.yml/badge.svg)
+![Deploy](https://github.com/sheetfyi/varysheet/actions/workflows/deploy.yml/badge.svg)
 ```
 
 ### 6.5 本地复现 CI 全流程
@@ -196,7 +208,7 @@ node scripts/smoke-test.mjs             # 期望 242/242 checks passed（.dev.va
 
 ```bash
 npx wrangler secret put RESEND_API_KEY     # 粘贴 re_... 开头的密钥
-npx wrangler secret put RESEND_FROM_EMAIL  # 例：Qafield <noreply@yourdomain.com>
+npx wrangler secret put RESEND_FROM_EMAIL  # 例：Varysheet <noreply@yourdomain.com>
 npx wrangler secret put ADMIN_EMAIL        # 例：you@yourdomain.com
 npx wrangler secret put ADMIN_PASSWORD     # 8 位以上、含字母与数字
 npx wrangler secret list                   # 确认写入结果

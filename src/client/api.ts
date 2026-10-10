@@ -1,5 +1,5 @@
 /**
- * Thin typed wrapper around the Qafield JSON API.
+ * Thin typed wrapper around the Varysheet JSON API.
  * Session handling relies on the HttpOnly cookie, hence `credentials: 'same-origin'`.
  *
  * 另有一层兜底：Cookie 存不下来的浏览器（无痕模式、「阻止所有 Cookie」、部分 App 内嵌
@@ -10,7 +10,10 @@
 import type {
   AdminDeleteUsersResponse,
   AdminPasswordResetResponse,
+  AdminSettings,
+  AdminSettingsResponse,
   AdminUserListResponse,
+  BrandingResponse,
   CellEditLocks,
   DatabaseChanges,
   DatabaseDetail,
@@ -28,7 +31,9 @@ import type {
   RowRecord,
   RowValues,
   SessionUser,
-  TableQuota,
+  TableKind,
+  TablePurchase,
+  TableQuotaSet,
   VerifyRegistrationResponse,
   ViewConfig,
   ViewDef,
@@ -39,10 +44,12 @@ import type {
 export interface SessionPayload {
   user: SessionUser | null;
   databases: DatabaseSummary[];
-  /** 表格名额（还能再添加几张）：登录后侧边栏底部直接就有数字可用 */
-  quota: TableQuota | null;
+  /** 表格名额（基础 / 专业各自还能加几张）：登录后侧边栏直接就有数字可用 */
+  quota: TableQuotaSet | null;
   maxUploadMb: number;
   appName: string;
+  /** 站点图标地址（管理员上传过才有），侧边栏 / 顶部条 / 登录页的标识区用 */
+  siteIconUrl: string | null;
 }
 
 export interface RecordsPage extends CellEditLocks {
@@ -158,6 +165,8 @@ const json = <T,>(path: string, method: string, body?: unknown, signal?: AbortSi
 
 export const api = {
   session: (signal?: AbortSignal) => json<SessionPayload>('/api/session', 'GET', undefined, signal),
+  /** 公开的品牌信息（站点名称 / 图标）：登录页、页面标题与 favicon 用，不需要登录 */
+  branding: () => json<BrandingResponse>('/api/branding', 'GET'),
   /** 注册第一步：只登记待确认的注册并发确认码，账号要等 `verifyRegistration` 之后才存在 */
   register: (body: { email: string; password: string; name: string }) =>
     json<RegistrationPending>('/api/auth/register', 'POST', body),
@@ -206,16 +215,39 @@ export const api = {
   adminDeleteUsers: (ids: string[]) =>
     json<AdminDeleteUsersResponse>('/api/admin/users/delete', 'POST', { ids }),
 
+  /**
+   * 「后台 → 站点设置」当前值：站点名称 / 图标 / 管理员邮箱 / Resend 密钥（只回传掩码）与发件人。
+   * 保存后的三个接口都会连带返回最新的 `branding`，前端据此立刻刷新页面标题与 favicon。
+   */
+  adminSettings: () => json<{ settings: AdminSettings }>('/api/admin/settings', 'GET'),
+  /** 保存站点设置；字段留空表示「清掉数据库里的值」，退回 Worker secret / 默认值 */
+  adminUpdateSettings: (body: { siteName?: string; adminEmail?: string; resendApiKey?: string; resendFromEmail?: string }) =>
+    json<AdminSettingsResponse>('/api/admin/settings', 'PATCH', body),
+  /** 上传 / 替换站点图标（multipart 的 `file` 字段） */
+  adminUploadSiteIcon: (file: File) => {
+    const form = new FormData();
+    form.set('file', file);
+    return request<AdminSettingsResponse>('/api/admin/settings/icon', { method: 'POST', form });
+  },
+  /** 移除站点图标（退回内置的默认标识） */
+  adminDeleteSiteIcon: () => json<AdminSettingsResponse>('/api/admin/settings/icon', 'DELETE'),
+
   /** 受邀人打开邀请链接：邀请信息（表格 / 视图 / 邀请人），无需登录 */
   invite: (token: string) => json<{ invite: InviteDetail }>(`/api/invites/${encodeURIComponent(token)}`, 'GET'),
   /** 接受邀请：填昵称 + 密码即完成注册，并直接登录（自动获得该视图分享） */
   acceptInvite: (token: string, body: { name: string; password: string; tokenInBody?: boolean }) =>
     json<InviteAcceptResponse>(`/api/invites/${encodeURIComponent(token)}/accept`, 'POST', body),
 
-  /** 表格名额（还能再添加几张）：侧边栏底部的数字 + 数量说明弹窗 */
-  quota: () => json<{ quota: TableQuota }>('/api/quota', 'GET'),
+  /** 表格名额（基础 / 专业各自还能加几张）：侧边栏的数字 + 数量说明弹窗 */
+  quota: () => json<{ quota: TableQuotaSet }>('/api/quota', 'GET'),
+  /**
+   * 购买表格名额：买几个就多几个可添加的表格（可选基础表格 / 专业表格）。
+   * 支付还没接入，服务端会立刻写一条购买流水并加名额。
+   */
+  purchaseQuota: (body: { kind: TableKind; count: number; note?: string }) =>
+    json<{ quota: TableQuotaSet; purchase: TablePurchase }>('/api/quota/purchases', 'POST', body),
   listDatabases: () => json<{ databases: DatabaseSummary[] }>('/api/databases', 'GET'),
-  createDatabase: (body: { name: string; icon?: string; description?: string; templateId?: string }) =>
+  createDatabase: (body: { name: string; kind?: TableKind; icon?: string; description?: string; templateId?: string }) =>
     json<DatabaseDetail>('/api/databases', 'POST', body),
   getDatabase: (id: string, params?: { limit?: number; offset?: number }) => {
     const query = new URLSearchParams();

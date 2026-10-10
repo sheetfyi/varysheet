@@ -3,6 +3,7 @@ export interface Env {
   DB: D1Database;
   BUCKET: R2Bucket;
   ASSETS: Fetcher;
+  /** 站点名称（品牌）的兜底值；管理员可在「后台 → 站点设置」里覆盖（存在 D1 settings 表） */
   APP_NAME?: string;
   MAX_UPLOAD_MB?: string;
   /** 单张表格的记录数上限（默认 500）：到上限后只能查看 / 查询，不再接受新增 */
@@ -10,11 +11,14 @@ export interface Env {
   /** 单张表格的附件总容量上限，单位 MB（默认 1024 = 1GB） */
   MAX_DATABASE_STORAGE_MB?: string;
   ALLOW_SIGNUP?: string;
-  /** Resend API Key（secret，`npx wrangler secret put RESEND_API_KEY`）；不配则注册确认码直接回显 */
+  /**
+   * Resend API Key（secret，`npx wrangler secret put RESEND_API_KEY`）；
+   * 也可以在「后台 → 站点设置」里直接填（那边优先），两边都没有则注册确认码直接回显
+   */
   RESEND_API_KEY?: string;
-  /** 发件人，例如 `Qafield <onboarding@resend.dev>`（用自备域名时改成自己的） */
+  /** 发件人，例如 `Varysheet <admin@varysheet.com>`；也可以在「后台 → 站点设置」里改（那边优先） */
   RESEND_FROM_EMAIL?: string;
-  /** 超级管理员的登录邮箱：登录时会被自动创建 / 提升为管理员 */
+  /** 超级管理员的登录邮箱：登录时会被自动创建 / 提升为管理员；兜底值可在「后台 → 站点设置」里改 */
   ADMIN_EMAIL?: string;
   /** 超级管理员初始密码（只用于「首次创建账号」；已存在时不会覆盖，除非 ADMIN_RESET_PASSWORD=true） */
   ADMIN_PASSWORD?: string;
@@ -24,6 +28,12 @@ export interface Env {
   AUTH_ECHO_CODE_DOMAINS?: string;
   /** 确认码有效期（分钟），默认 15 */
   AUTH_CODE_TTL_MINUTES?: string;
+  /**
+   * 基础表格的数据保留期（天，默认 365）：超过这个时间的记录与附件会被定时任务
+   * 自动清除（见 src/worker/retention.ts）。专业表格永远不受影响；设成 0 表示关闭
+   * 自动清除（只建议本地调试用）。
+   */
+  BASIC_TABLE_RETENTION_DAYS?: string;
 }
 
 export interface AuthedUser {

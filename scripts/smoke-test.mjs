@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /**
- * End-to-end smoke test for Qafield.
+ * End-to-end smoke test for Varysheet.
  *
  * Runs against a live Worker - either `npm run dev` / `npm run preview`
  * (http://127.0.0.1:8787) or a deployed URL:
  *
  *   node scripts/smoke-test.mjs
- *   BASE_URL=https://qafield.example.workers.dev node scripts/smoke-test.mjs
+ *   BASE_URL=https://varysheet.example.workers.dev node scripts/smoke-test.mjs
  *
  * It registers throw-away accounts and walks the critical path: two-step
  * signup (email code) -> session -> create table -> add field -> records
@@ -153,7 +153,7 @@ function waitForGraceWindow() {
 }
 
 async function main() {
-  section(`Qafield smoke test -> ${BASE}`);
+  section(`Varysheet smoke test -> ${BASE}`);
   const alive = await waitForServer();
   if (!check('worker reachable (/api/health)', alive)) {
     console.error('\nStart the worker first: npm run dev');
@@ -247,6 +247,40 @@ async function main() {
   check('a new account has no starter table', starterCount === 0, `${starterCount} table(s)`);
   check('session exposes app meta', typeof session.data?.appName === 'string' && typeof session.data?.maxUploadMb === 'number');
 
+  // 表格名额：新账号默认 0 个（原来送 1 个基础表格，已取消）。后面的段落都要建表，
+  // 这里先买一批基础名额 + 1 个专业名额（主测试表是专业表格），免得每段都撞 403。
+  const freshQuota = await call('/api/quota');
+  check(
+    'a new account gets no free table slots',
+    freshQuota.status === 200 &&
+      freshQuota.data?.quota?.basic?.total === 0 &&
+      freshQuota.data?.quota?.basic?.remaining === 0 &&
+      freshQuota.data?.quota?.pro?.remaining === 0,
+    `basic=${JSON.stringify(freshQuota.data?.quota?.basic)} pro=${JSON.stringify(freshQuota.data?.quota?.pro)}`,
+  );
+  const bootstrapSlots = await call('/api/quota/purchases', {
+    method: 'POST',
+    body: { kind: 'basic', count: 10 },
+  });
+  check(
+    'buying basic table slots works out of the box',
+    bootstrapSlots.status === 201 &&
+      bootstrapSlots.data?.purchase?.kind === 'basic' &&
+      bootstrapSlots.data?.purchase?.count === 10 &&
+      bootstrapSlots.data?.quota?.basic?.purchased === 10 &&
+      bootstrapSlots.data?.quota?.basic?.remaining === 10,
+    `purchased=${bootstrapSlots.data?.quota?.basic?.purchased} remaining=${bootstrapSlots.data?.quota?.basic?.remaining}`,
+  );
+  // 主测试表是专业表格，再买 1 个专业名额（「名额不够」的 403 在 table quota 一段验）
+  const bootstrapPro = await call('/api/quota/purchases', { method: 'POST', body: { kind: 'pro', count: 1 } });
+  check(
+    'buying pro table slots works out of the box',
+    bootstrapPro.status === 201 &&
+      bootstrapPro.data?.quota?.pro?.purchased === 1 &&
+      bootstrapPro.data?.quota?.pro?.remaining === 1,
+    `purchased=${bootstrapPro.data?.quota?.pro?.purchased} remaining=${bootstrapPro.data?.quota?.pro?.remaining}`,
+  );
+
   // ------------------------------- 会话兜底：Cookie 存不下来的手机浏览器（tokenInBody）
   section('session fallback (tokenInBody + Authorization)');
   const bearerEmail = `smoke+bearer+${Date.now()}@example.com`;
@@ -308,9 +342,11 @@ async function main() {
 
   // ------------------------------------------------------------- table + fields
   section('tables and fields');
+  // 这张主测试表用**专业表格**：后面几段会往它上面加 6 个视图、十个左右字段，
+  // 基础表格的 3 视图 / 10 列上限放不下（基础表格的上限在「table quota」一段专门验证）。
   const created = await call('/api/databases', {
     method: 'POST',
-    body: { name: 'Smoke 表格', templateId: 'task' },
+    body: { name: 'Smoke 表格', templateId: 'task', kind: 'pro' },
   });
   const databaseId = created.data?.id;
   if (!check('create table from template', created.status === 201 && Boolean(databaseId), `status=${created.status}`)) {
@@ -1790,7 +1826,7 @@ async function main() {
   // -------------------------------------------------------------------- files
   section('files');
   const form = new FormData();
-  form.set('file', new Blob(['qafield smoke test'], { type: 'text/plain' }), 'smoke.txt');
+  form.set('file', new Blob(['varysheet smoke test'], { type: 'text/plain' }), 'smoke.txt');
   form.set('databaseId', databaseId);
   const uploaded = await call('/api/files', { method: 'POST', form });
   const fileId = uploaded.data?.file?.id;
@@ -1799,7 +1835,7 @@ async function main() {
   if (fileId) {
     const download = await fetch(`${BASE}/api/files/${fileId}`, { headers: { cookie } });
     const text = await download.text();
-    check('download file', download.ok && text === 'qafield smoke test', `status=${download.status}`);
+    check('download file', download.ok && text === 'varysheet smoke test', `status=${download.status}`);
   }
 
   // ---------------------------------------------------------------- capacity
@@ -1812,8 +1848,12 @@ async function main() {
   const cap = capSummary?.capacity;
   check(
     'session exposes per-table capacity',
-    typeof cap?.maxRecords === 'number' && cap.maxRecords > 0 && typeof cap?.maxStorageBytes === 'number',
-    `records=${cap?.records}/${cap?.maxRecords} storage=${cap?.storageBytes}/${cap?.maxStorageBytes}`,
+    typeof cap?.maxRecords === 'number' &&
+      typeof cap?.maxStorageBytes === 'number' &&
+      cap?.atCapacity === false &&
+      // 主测试表是专业表格：容量与保留时间都不限（基础表格的 500 条 / 1GB 在下面那张临时表上验）
+      cap?.unlimited === true,
+    `records=${cap?.records}/${cap?.maxRecords} unlimited=${cap?.unlimited === true} storage=${cap?.storageBytes}`,
   );
   const capRows = await call(`/api/databases/${databaseId}/rows?limit=1`);
   check(
@@ -1829,12 +1869,20 @@ async function main() {
     `maxRecords=${capDetail.data?.capacity?.maxRecords} atCapacity=${capDetail.data?.capacity?.atCapacity}`,
   );
 
-  // 专门用来把「已满」这个状态跑出来的临时表格：上限由环境变量决定，所以按
-  // 接口下发的 maxRecords 灌满（一次 200 行，和批量接口的上限一致）。
+  // 专门用来把「已满」这个状态跑出来的临时表格（默认 = 基础表格）：上限从它自己的
+  // 容量快照里读，然后按 maxRecords 灌满（一次 200 行，和批量接口的上限一致）。
   const capTable = await call('/api/databases', { method: 'POST', body: { name: 'Smoke 容量表' } });
   const capTableId = capTable.data?.id;
   const capFieldId = (capTable.data?.properties ?? [])[0]?.id;
-  const maxRecords = cap?.maxRecords ?? 0;
+  const maxRecords = capTable.data?.capacity?.maxRecords ?? 0;
+  check(
+    'a basic table reports the record / storage / retention limits',
+    capTable.data?.capacity?.kind === 'basic' &&
+      capTable.data?.capacity?.unlimited === false &&
+      maxRecords > 0 &&
+      (capTable.data?.capacity?.retentionDays ?? 0) > 0,
+    `maxRecords=${maxRecords} retentionDays=${capTable.data?.capacity?.retentionDays} unlimited=${capTable.data?.capacity?.unlimited}`,
+  );
   if (
     check(
       'temp table for the capacity checks',
@@ -1941,48 +1989,203 @@ async function main() {
   const quotaBefore = await call('/api/quota');
   const beforeQuota = quotaBefore.data?.quota;
   check(
-    'the owner can read the table quota',
+    'the owner can read both table quotas',
     quotaBefore.status === 200 &&
-      beforeQuota?.total === (beforeQuota?.shared ?? 0) + (beforeQuota?.purchased ?? 0) + 1 &&
-      beforeQuota?.remaining === Math.max(0, (beforeQuota?.total ?? 0) - (beforeQuota?.used ?? 0)),
-    `used=${beforeQuota?.used} shared=${beforeQuota?.shared} total=${beforeQuota?.total} remaining=${beforeQuota?.remaining}`,
+      typeof beforeQuota?.basic?.remaining === 'number' &&
+      typeof beforeQuota?.pro?.remaining === 'number' &&
+      // 没有默认名额：总名额 = 分享得到的 + 购买来的
+      beforeQuota?.basic?.total === (beforeQuota?.basic?.shared ?? 0) + (beforeQuota?.basic?.purchased ?? 0) &&
+      beforeQuota?.pro?.total === (beforeQuota?.pro?.shared ?? 0) + (beforeQuota?.pro?.purchased ?? 0) &&
+      beforeQuota?.basic?.remaining === Math.max(0, (beforeQuota?.basic?.total ?? 0) - (beforeQuota?.basic?.used ?? 0)),
+    `basic=${JSON.stringify(beforeQuota?.basic)} pro=${JSON.stringify(beforeQuota?.pro)}`,
+  );
+
+  // 名额用光的账号建不了表：用一个全新账号验（它 0 名额，这张表本身也建不出来）
+  const noSlotEmail = `smoke+noslot+${Date.now()}@example.com`;
+  const noSlotAccount = await registerAccount({ email: noSlotEmail, name: 'No Slot' });
+  // 注册那两步不带 cookie，所以这里显式登录成新账号（会换掉当前 cookie）
+  const noSlotLogin = await call('/api/auth/login', {
+    method: 'POST',
+    body: { email: noSlotEmail, password: PASSWORD },
+  });
+  const noSlotQuota = (await call('/api/quota')).data?.quota;
+  const noSlotTable = await call('/api/databases', {
+    method: 'POST',
+    body: { name: '没名额的表', kind: 'basic' },
+  });
+  check(
+    'an account without any slot cannot create a table',
+    noSlotAccount.verified?.status === 201 &&
+      noSlotLogin.status === 200 &&
+      noSlotQuota?.basic?.remaining === 0 &&
+      noSlotTable.status === 403 &&
+      noSlotTable.data?.error?.code === 'quota_exceeded',
+    `register=${noSlotAccount.verified?.status} status=${noSlotTable.status} code=${noSlotTable.data?.error?.code ?? ''}`,
+  );
+  // 上面的注册把 cookie 换成了新账号：登录回主测试账号继续后面的断言
+  const backToMain = await call('/api/auth/login', {
+    method: 'POST',
+    body: { email, password: PASSWORD },
+  });
+  const quotaBack = (await call('/api/quota')).data?.quota;
+  check(
+    'the main account gets its slots back after switching back',
+    backToMain.status === 200 &&
+      quotaBack?.basic?.remaining === beforeQuota?.basic?.remaining &&
+      quotaBack?.pro?.remaining === beforeQuota?.pro?.remaining,
+    `basic=${quotaBack?.basic?.remaining} pro=${quotaBack?.pro?.remaining}`,
+  );
+
+  // 买 2 个专业表格名额：买几个就多几个（买完立刻可以建专业表）
+  const proPurchase = await call('/api/quota/purchases', {
+    method: 'POST',
+    body: { kind: 'pro', count: 2 },
+  });
+  check(
+    'buying pro table slots adds exactly that many',
+    proPurchase.status === 201 &&
+      proPurchase.data?.quota?.pro?.purchased === (beforeQuota?.pro?.purchased ?? 0) + 2 &&
+      proPurchase.data?.quota?.pro?.total === (beforeQuota?.pro?.total ?? 0) + 2 &&
+      proPurchase.data?.quota?.pro?.remaining === (beforeQuota?.pro?.remaining ?? 0) + 2,
+    `purchased=${proPurchase.data?.quota?.pro?.purchased} total=${proPurchase.data?.quota?.pro?.total} remaining=${proPurchase.data?.quota?.pro?.remaining}`,
   );
 
   const quotaTable = await call('/api/databases', { method: 'POST', body: { name: '名额测试表' } });
   const afterCreate = (await call('/api/quota')).data?.quota;
   check(
-    'adding a table spends one slot',
+    'adding a basic table spends one basic slot',
     quotaTable.status === 201 &&
-      afterCreate?.used === (beforeQuota?.used ?? 0) + 1 &&
-      afterCreate?.remaining === Math.max(0, (beforeQuota?.remaining ?? 0) - 1),
-    `used=${beforeQuota?.used}->${afterCreate?.used} remaining=${beforeQuota?.remaining}->${afterCreate?.remaining}`,
+      quotaTable.data?.kind === 'basic' &&
+      afterCreate?.basic?.used === (beforeQuota?.basic?.used ?? 0) + 1 &&
+      afterCreate?.basic?.remaining === (beforeQuota?.basic?.remaining ?? 0) - 1,
+    `used=${beforeQuota?.basic?.used}->${afterCreate?.basic?.used} remaining=${beforeQuota?.basic?.remaining}->${afterCreate?.basic?.remaining}`,
   );
 
-  // 分享出去一次（公开链接）就多一个可添加的名额
+  // 容量口径：基础表格 500 条 / 1GB / 保留一年；专业表格三个维度都不限
+  const basicCapacity = quotaTable.data?.capacity;
+  check(
+    'a basic table keeps the record / storage / retention limits',
+    basicCapacity?.kind === 'basic' &&
+      basicCapacity?.unlimited === false &&
+      basicCapacity?.maxRecords === maxRecords &&
+      basicCapacity?.retentionDays === 365,
+    `maxRecords=${basicCapacity?.maxRecords} retentionDays=${basicCapacity?.retentionDays}`,
+  );
+
+  const proTable = await call('/api/databases', {
+    method: 'POST',
+    body: { name: '专业容量表', kind: 'pro' },
+  });
+  const proCapacity = proTable.data?.capacity;
+  check(
+    'a pro table reports unlimited capacity and no retention',
+    proTable.status === 201 &&
+      proTable.data?.kind === 'pro' &&
+      proCapacity?.unlimited === true &&
+      proCapacity?.maxRecords === 0 &&
+      proCapacity?.maxStorageBytes === 0 &&
+      proCapacity?.retentionDays === 0 &&
+      proCapacity?.recordsFull === false &&
+      proCapacity?.storageFull === false &&
+      proCapacity?.atCapacity === false,
+    `unlimited=${proCapacity?.unlimited} maxRecords=${proCapacity?.maxRecords} retentionDays=${proCapacity?.retentionDays}`,
+  );
+
+  // 分享出去一次（公开链接）就多一个**同类型**的可添加名额
+  const beforeShare = (await call('/api/quota')).data?.quota;
   const quotaShare = await call(`/api/databases/${quotaTable.data?.id}/shares`, {
     method: 'POST',
     body: { permission: 'view' },
   });
   const afterShare = (await call('/api/quota')).data?.quota;
   check(
-    'sharing a table grants one more slot',
+    'sharing a basic table grants one more basic slot',
     quotaShare.status === 201 &&
-      afterShare?.shared === (afterCreate?.shared ?? 0) + 1 &&
-      afterShare?.total === (afterCreate?.total ?? 0) + 1 &&
-      afterShare?.remaining === (afterCreate?.remaining ?? 0) + 1,
-    `shared=${afterCreate?.shared}->${afterShare?.shared} remaining=${afterCreate?.remaining}->${afterShare?.remaining}`,
+      afterShare?.basic?.shared === (beforeShare?.basic?.shared ?? 0) + 1 &&
+      afterShare?.basic?.total === (beforeShare?.basic?.total ?? 0) + 1 &&
+      afterShare?.basic?.remaining === (beforeShare?.basic?.remaining ?? 0) + 1 &&
+      // 分享基础表格不会动到专业表格的名额
+      afterShare?.pro?.remaining === beforeShare?.pro?.remaining,
+    `status=${quotaShare.status} shared=${beforeShare?.basic?.shared}->${afterShare?.basic?.shared} remaining=${beforeShare?.basic?.remaining}->${afterShare?.basic?.remaining}`,
   );
 
-  // 清理：删掉分享链接与这张测试表，别给后面的段落留下干扰
+  // 列数上限：基础表格 10 列、专业表格 20 列（空白表自带「名称」一列，只拦新增）
+  const addColumn = (databaseId, name) =>
+    call(`/api/databases/${databaseId}/properties`, { method: 'POST', body: { name, type: 'text' } });
+  const fillColumns = async (databaseId, already, limit) => {
+    let columns = already;
+    while (columns < limit) {
+      const added = await addColumn(databaseId, `列 ${columns + 1}`);
+      if (added.status !== 201) return { columns, blocked: added };
+      columns += 1;
+    }
+    const blocked = await addColumn(databaseId, `列 ${columns + 1}`);
+    return { columns, blocked };
+  };
+
+  const basicColumns = await fillColumns(quotaTable.data?.id, (quotaTable.data?.properties ?? []).length, 10);
+  check(
+    'a basic table stops at 10 columns',
+    basicColumns.columns === 10 &&
+      basicColumns.blocked?.status === 403 &&
+      basicColumns.blocked?.data?.error?.code === 'limit_exceeded',
+    `columns=${basicColumns.columns} status=${basicColumns.blocked?.status} code=${basicColumns.blocked?.data?.error?.code ?? ''}`,
+  );
+
+  const proColumns = await fillColumns(proTable.data?.id, (proTable.data?.properties ?? []).length, 20);
+  check(
+    'a pro table stops at 20 columns',
+    proColumns.columns === 20 &&
+      proColumns.blocked?.status === 403 &&
+      proColumns.blocked?.data?.error?.code === 'limit_exceeded',
+    `columns=${proColumns.columns} status=${proColumns.blocked?.status} code=${proColumns.blocked?.data?.error?.code ?? ''}`,
+  );
+
+  // 视图数上限：基础表格 3 个、专业表格 10 个（新建表格自带 1 个「全部数据」）
+  const addView = (databaseId, name) =>
+    call(`/api/databases/${databaseId}/views`, { method: 'POST', body: { type: 'table', name } });
+  const fillViews = async (databaseId, already, limit) => {
+    let views = already;
+    while (views < limit) {
+      const added = await addView(databaseId, `视图 ${views + 1}`);
+      if (added.status !== 201) return { views, blocked: added };
+      views += 1;
+    }
+    const blocked = await addView(databaseId, `视图 ${views + 1}`);
+    return { views, blocked };
+  };
+
+  const basicViews = await fillViews(quotaTable.data?.id, (quotaTable.data?.views ?? []).length, 3);
+  check(
+    'a basic table stops at 3 views',
+    basicViews.views === 3 &&
+      basicViews.blocked?.status === 403 &&
+      basicViews.blocked?.data?.error?.code === 'limit_exceeded',
+    `views=${basicViews.views} status=${basicViews.blocked?.status} code=${basicViews.blocked?.data?.error?.code ?? ''}`,
+  );
+
+  const proViews = await fillViews(proTable.data?.id, (proTable.data?.views ?? []).length, 10);
+  check(
+    'a pro table stops at 10 views',
+    proViews.views === 10 &&
+      proViews.blocked?.status === 403 &&
+      proViews.blocked?.data?.error?.code === 'limit_exceeded',
+    `views=${proViews.views} status=${proViews.blocked?.status} code=${proViews.blocked?.data?.error?.code ?? ''}`,
+  );
+
+  // 清理：删掉分享链接与这两张测试表，别给后面的段落留下干扰
   await call(`/api/shares/${(quotaShare.data?.shares ?? [])[0]?.id}`, { method: 'DELETE' });
+  const removedProTable = await call(`/api/databases/${proTable.data?.id}`, { method: 'DELETE' });
   const removedQuotaTable = await call(`/api/databases/${quotaTable.data?.id}`, { method: 'DELETE' });
   const settledQuota = (await call('/api/quota')).data?.quota;
   check(
-    'removing the test table and its link restores the quota',
-    removedQuotaTable.data?.ok === true &&
-      settledQuota?.used === beforeQuota?.used &&
-      settledQuota?.shared === beforeQuota?.shared,
-    `used=${settledQuota?.used} shared=${settledQuota?.shared}`,
+    'removing the test tables and the link restores the quota',
+    removedProTable.data?.ok === true &&
+      removedQuotaTable.data?.ok === true &&
+      settledQuota?.basic?.used === beforeQuota?.basic?.used &&
+      settledQuota?.basic?.shared === beforeQuota?.basic?.shared &&
+      settledQuota?.pro?.used === beforeQuota?.pro?.used,
+    `basic=${JSON.stringify(settledQuota?.basic)} pro=${JSON.stringify(settledQuota?.pro)}`,
   );
 
   // ------------------------------------------------------------------ cleanup

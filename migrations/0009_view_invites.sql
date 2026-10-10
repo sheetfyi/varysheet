@@ -1,4 +1,4 @@
--- Qafield - 视图分享邀请（D1 / SQLite）
+-- Varysheet - 视图分享邀请（D1 / SQLite）
 -- Applied with:  npx wrangler d1 migrations apply cloudnotion-db --local|--remote
 --
 -- 背景：视图定向分享以前只能分享给**已经注册**的账号（邮箱不存在就直接报错）。

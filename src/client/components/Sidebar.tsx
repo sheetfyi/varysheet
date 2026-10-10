@@ -6,35 +6,49 @@ import {
   capacityRatio,
   capacityRecordsSide,
   capacityRecordsUsageText,
+  capacityRetentionHint,
   capacityStorageSide,
   capacityStorageUsageText,
   capacityTooltip,
+  capacityUnlimited,
   capacityUsageSummary,
 } from '../../shared/capacity';
 import {
   MAX_PURCHASE_COUNT,
+  quotaSetFromUsed,
   TABLE_QUOTA_RULES,
-  tableQuotaOf,
+  tableQuotaHasRoom,
+  tableQuotaRemaining,
   tableQuotaSummary,
 } from '../../shared/quota';
+import {
+  TABLE_KIND_FEATURES,
+  TABLE_KINDS,
+  tableKindCapacityText,
+  tableKindMeta,
+} from '../../shared/tableKind';
 import type {
   DatabaseCapacity,
   DatabaseSummary,
   InboxMessage,
   SessionUser,
-  TableQuota,
+  TableKind,
+  TableQuotaSet,
 } from '../../shared/types';
 import { ApiError } from '../api';
 import { InboxButton } from './InboxButton';
 import { Modal } from './Modal';
+import { SiteMark } from './SiteMark';
 import { UserChip } from './UserChip';
 
 interface SidebarProps {
   appName: string;
+  /** 站点图标（管理员上传过才有），跟在站点名称前面显示 */
+  siteIconUrl: string | null;
   user: SessionUser | null;
   databases: DatabaseSummary[];
-  /** 表格名额（还能再添加几张）：会话里与 `GET /api/quota` 下发 */
-  quota: TableQuota | null;
+  /** 表格名额（基础 / 专业各自还能再添加几张）：会话里与 `GET /api/quota` 下发 */
+  quota: TableQuotaSet | null;
   activeId: string | null;
   /** 未读私信（收件箱左上角图标 + 红点数字） */
   inbox: InboxMessage[];
@@ -44,7 +58,8 @@ interface SidebarProps {
   /** 窄屏时用 ✕ 收起抽屉，而不是桌面端的 «（按钮样式见 styles.css 的 .collapse-btn） */
   narrow: boolean;
   onSelect: (id: string) => void;
-  onCreate: (input: { name: string }) => Promise<void>;
+  /** 新建表格：带上类型（基础表格 / 专业表格），名额按类型扣 */
+  onCreate: (input: { name: string; kind: TableKind }) => Promise<void>;
   /** 收起侧边栏（手机端会同时移除遮罩层） */
   onClose: () => void;
   onLogout: () => void;
@@ -58,8 +73,8 @@ interface SidebarProps {
   onInboxRefresh: () => void;
   /** 点开一条私信：已读 + 打开记录卡片并定位到那条备注 */
   onInboxSelect: (message: InboxMessage) => void;
-  /** 轻提示（目前只有容量浮层里的「扩容」按钮用） */
-  onToast: (message: string, kind?: 'info' | 'error') => void;
+  /** 购买表格名额（说明弹窗里的「购买」）：由 App 调接口、刷新名额并弹提示 */
+  onBuyQuota: (input: { kind: TableKind; count: number }) => Promise<void>;
 }
 
 /** 容量浮层的宽度（与侧边栏同宽；窄屏按视口夹取，不会横向溢出） */
@@ -74,8 +89,11 @@ function clampToViewport(value: number, min: number, max: number): number {
 }
 
 /**
- * 容量明细浮层：记录 / 附件各自的「已用 / 上限 / 剩余」+ 剩余条，右下角一个「扩容」按钮
- * （按钮还没接功能，点了只提示一句「开发中」）。
+ * 容量明细浮层：记录 / 附件各自的「已用 / 上限 / 剩余」+ 剩余条。
+ *
+ * 专业表格（不限容量）两侧都显示「不限」；基础表格在下面多一行「数据保留 1 年，
+ * 超期自动清除」的说明。原来的「扩容」按钮已按需求移除（名额改走「表格数量说明」
+ * 弹窗里的购买 / 分享）。
  *
  * 用 `createPortal` 挂到 body 上，两个原因：
  *   1. 侧边栏列表是滚动容器（`overflow: auto`），浮层放在行内会被裁掉；
@@ -87,7 +105,6 @@ function CapacityPanel({
   capacity,
   anchor,
   onClose,
-  onUpgrade,
 }: {
   /** 表格名（浮层标题用） */
   name: string;
@@ -95,7 +112,6 @@ function CapacityPanel({
   /** 锚点：容量条本身，浮层按它的实时位置摆放 */
   anchor: HTMLElement;
   onClose: () => void;
-  onUpgrade: () => void;
 }) {
   const panel = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
@@ -151,6 +167,8 @@ function CapacityPanel({
 
   const records = capacityRecordsSide(capacity);
   const storage = capacityStorageSide(capacity);
+  // 基础表格的保留期说明（专业表格返回空串，不用提示）
+  const retention = capacityRetentionHint(capacity);
   return createPortal(
     <div
       ref={panel}
@@ -170,6 +188,13 @@ function CapacityPanel({
       <div className="capacity-pop-title">
         <span className="capacity-pop-name" title={name}>
           {name}
+        </span>
+        {/* 表格类型：基础 / 专业，鼠标悬停能看这一类的容量口径 */}
+        <span
+          className={`kind-tag ${capacity.kind}`}
+          title={tableKindCapacityText(capacity.kind)}
+        >
+          {tableKindMeta(capacity.kind).shortLabel}
         </span>
         {capacity.atCapacity ? <span className="capacity-full-tag">已满</span> : null}
       </div>
@@ -194,19 +219,19 @@ function CapacityPanel({
         </span>
       </div>
 
+      {retention ? (
+        <p className="capacity-pop-note" title={retention}>
+          {retention}
+        </p>
+      ) : null}
+
       <p className={`capacity-pop-note${capacity.atCapacity ? ' danger' : ''}`}>
         {capacity.atCapacity
           ? capacityBlockedHint(capacity)
-          : '到上限后只能查看和查询：新增记录、复制记录与上传附件都会停用，删掉一些数据就能恢复'}
+          : capacityUnlimited(capacity)
+            ? `${tableKindMeta(capacity.kind).label}：容量与存储时间都不限制`
+            : '到上限后只能查看和查询：新增记录、复制记录与上传附件都会停用，删掉一些数据就能恢复'}
       </p>
-
-      <div className="capacity-pop-foot">
-        <span className="capacity-pop-note">不够用？</span>
-        <span className="spacer" />
-        <button type="button" className="btn primary small" title="扩容功能开发中，敬请期待" onClick={onUpgrade}>
-          扩容
-        </button>
-      </div>
     </div>,
     document.body,
   );
@@ -223,11 +248,9 @@ function CapacityPanel({
 function CapacityMeter({
   name,
   capacity,
-  onToast,
 }: {
   name: string;
   capacity?: DatabaseCapacity;
-  onToast: (message: string, kind?: 'info' | 'error') => void;
 }) {
   // 浮层锚点：存元素本身，滚动时按它的实时位置重算（hook 得放在下面的提前 return 之前）
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
@@ -266,37 +289,52 @@ function CapacityMeter({
       </span>
       {capacity.atCapacity ? <span className="capacity-full-tag">已满</span> : null}
       {anchor ? (
-        <CapacityPanel
-          name={name}
-          capacity={capacity}
-          anchor={anchor}
-          onClose={close}
-          onUpgrade={() => onToast('扩容功能还在开发中，敬请期待')}
-        />
+        <CapacityPanel name={name} capacity={capacity} anchor={anchor} onClose={close} />
       ) : null}
     </>
   );
 }
 
 /**
- * 「表格数量说明」弹窗：讲清名额规则（新账号 1 个、每分享一次 +1、可以购买）+ 购买入口。
+ * 「表格数量说明」弹窗：讲清名额规则（两类分开算、每分享一次 +1、可以购买）+ 购买入口，
+ * 外加一张「基础表格 / 专业表格的功能区别」对比表。
  *
- * 数量都是服务端下发的权威值（口径见 `src/shared/quota.ts`）。购买功能还没上线：
- * 选好数量点「购买」只会提示一句「开发中」，不影响现有表格。
+ * 数量都是服务端下发的权威值（口径见 `src/shared/quota.ts`）。购买走 App 传进来的
+ * `onBuy`（`POST /api/quota/purchases`），成功后会立刻刷新这里的数字。
  */
 function QuotaDialog({
   quota,
   onClose,
   onBuy,
 }: {
-  quota: TableQuota;
+  quota: TableQuotaSet;
   onClose: () => void;
-  onBuy: (count: number) => void;
+  onBuy: (input: { kind: TableKind; count: number }) => Promise<void>;
 }) {
+  const [kind, setKind] = useState<TableKind>('basic');
   const [count, setCount] = useState(1);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const meta = tableKindMeta(kind);
+
+  const submit = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      await onBuy({ kind, count });
+      onClose();
+    } catch (cause) {
+      setError(cause instanceof ApiError ? cause.message : '购买失败，请稍后再试');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <Modal title="表格数量说明" onClose={onClose}>
-      <p className="small muted quota-current">{tableQuotaSummary(quota)}</p>
+      <p className="small muted quota-current">{tableQuotaSummary(quota.basic)}</p>
+      <p className="small muted quota-current">{tableQuotaSummary(quota.pro)}</p>
 
       <ul className="quota-rule-list">
         {TABLE_QUOTA_RULES.map((rule) => (
@@ -304,7 +342,44 @@ function QuotaDialog({
         ))}
       </ul>
 
+      {/* 两类表格的功能区别：容量 / 存储时间 / 列数 / 视图数 */}
+      <table className="quota-kind-table">
+        <thead>
+          <tr>
+            <th scope="col">功能</th>
+            {TABLE_KINDS.map((item) => (
+              <th scope="col" key={item}>
+                {tableKindMeta(item).label}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {TABLE_KIND_FEATURES.map((feature) => (
+            <tr key={feature.label}>
+              <th scope="row">{feature.label}</th>
+              <td>{feature.basic}</td>
+              <td>{feature.pro}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
       <div className="quota-buy">
+        <label className="field">
+          <span>表格类型</span>
+          <select
+            className="input"
+            value={kind}
+            onChange={(event) => setKind(event.target.value === 'pro' ? 'pro' : 'basic')}
+          >
+            {TABLE_KINDS.map((item) => (
+              <option key={item} value={item}>
+                {tableKindMeta(item).label}
+              </option>
+            ))}
+          </select>
+        </label>
         <label className="field">
           <span>购买数量</span>
           <select className="input" value={count} onChange={(event) => setCount(Number(event.target.value))}>
@@ -315,18 +390,23 @@ function QuotaDialog({
             ))}
           </select>
         </label>
-        <button type="button" className="btn primary" onClick={() => onBuy(count)}>
-          购买
+        <button type="button" className="btn primary" disabled={busy} onClick={() => void submit()}>
+          {busy ? '购买中…' : '购买'}
         </button>
       </div>
 
-      <p className="small muted">购买功能还在开发中：现在点「购买」只会提示一句，不会扣费，也不影响已有表格。</p>
+      <p className="small muted">
+        选中的是「{meta.label}」：买几个就多几个可添加的{meta.label}名额（
+        {tableKindCapacityText(kind)}）。支付还没接入，点「购买」会立刻加名额并记一条购买流水。
+      </p>
+      {error ? <p className="error small">{error}</p> : null}
     </Modal>
   );
 }
 
 export function Sidebar({
   appName,
+  siteIconUrl,
   user,
   databases,
   quota,
@@ -344,10 +424,12 @@ export function Sidebar({
   onOpenAdmin,
   onInboxRefresh,
   onInboxSelect,
-  onToast,
+  onBuyQuota,
 }: SidebarProps) {
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState('');
+  /** 新建表格的类型（基础表格 / 专业表格）：名额按类型扣 */
+  const [kind, setKind] = useState<TableKind>('basic');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   /** 「表格数量说明」弹窗：点「你有 N 个表格可以添加」里的 N 打开 */
@@ -356,12 +438,21 @@ export function Sidebar({
   const sharedDatabases = databases.filter((database) => database.viewScoped);
   const myDatabases = databases.filter((database) => !database.viewScoped);
   /**
-   * 名额：优先用服务端下发的权威值；万一还没拿到（离线 / 接口偶发失败），
-   * 就按「基础名额 - 已有表格」本地兜底，别让那句文案空着。
+   * 名额：优先用服务端下发的权威值（基础 / 专业两类）；万一还没拿到（离线 / 接口偶发
+   * 失败），就按「每类已有表格数」本地兜底，别让那两行文案空着或让侧边栏崩掉。
    */
-  const quotaView = quota ?? tableQuotaOf({ used: myDatabases.length, shared: 0 });
-  /** 名额用完（剩余 0）时「添加」按钮置灰不可点：只能先分享表格或购买名额 */
-  const addDisabled = quotaView.remaining <= 0;
+  const quotaView =
+    quota?.basic && quota?.pro
+      ? quota
+      : // 兜底：老响应（或还没拿到数据）里没有两类名额，就按「已有表格数」显示，别让侧边栏崩掉
+        quotaSetFromUsed({
+          basic: myDatabases.filter((database) => database.kind !== 'pro').length,
+          pro: myDatabases.filter((database) => database.kind === 'pro').length,
+        });
+  /** 两类名额都空了（合计剩余 0）才把「添加」按钮置灰：还能先分享表格或购买名额 */
+  const addDisabled = tableQuotaRemaining(quotaView) <= 0;
+  /** 当前选中的类型没有名额了：创建按钮置灰，提示先分享 / 购买 */
+  const kindHasRoom = tableQuotaHasRoom(quotaView, kind);
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -369,7 +460,7 @@ export function Sidebar({
     setBusy(true);
     setError('');
     try {
-      await onCreate({ name: name.trim() });
+      await onCreate({ name: name.trim(), kind });
       setName('');
       setCreating(false);
     } catch (cause) {
@@ -387,7 +478,7 @@ export function Sidebar({
       inert={open ? undefined : true}
     >
       <div className="sidebar-head">
-        <span className="brand">{appName}</span>
+        <SiteMark appName={appName} siteIconUrl={siteIconUrl} className="brand" />
         {/* 左上角的收件箱：红点里的数字是未读私信条数 */}
         <InboxButton
           messages={inbox}
@@ -417,12 +508,12 @@ export function Sidebar({
               type="button"
               className="quota-count"
               title="表格数量规则与购买"
-              aria-label={`还可以添加 ${quotaView.remaining} 个表格，点击查看数量说明`}
+              aria-label={`还可以添加 ${quotaView.basic.remaining} 个基础表格，点击查看数量说明`}
               onClick={() => setQuotaOpen(true)}
             >
-              {quotaView.remaining}
+              {quotaView.basic.remaining}
             </button>
-            个表格可
+            个基础表格可
           </p>
           <button
             type="button"
@@ -436,6 +527,20 @@ export function Sidebar({
             添加
           </button>
         </div>
+        {/* 专业表格名额单独一行：两类名额分开算，点数字都是同一个说明弹窗 */}
+        <p className="sidebar-add-note quota-pro-line">
+          专业表格可添加
+          <button
+            type="button"
+            className="quota-count"
+            title="表格数量规则与购买"
+            aria-label={`还可以添加 ${quotaView.pro.remaining} 个专业表格，点击查看数量说明`}
+            onClick={() => setQuotaOpen(true)}
+          >
+            {quotaView.pro.remaining}
+          </button>
+          个
+        </p>
 
         {/* 新建表格固定落成空白表格（只有「名称」字段），不再让用户挑模板 */}
         {creating && !addDisabled ? (
@@ -450,9 +555,28 @@ export function Sidebar({
                 placeholder="例如：项目排期"
               />
             </label>
+            <label className="field">
+              <span>表格类型</span>
+              <select
+                className="input"
+                value={kind}
+                onChange={(event) => setKind(event.target.value === 'pro' ? 'pro' : 'basic')}
+              >
+                {TABLE_KINDS.map((item) => (
+                  <option key={item} value={item} disabled={!tableQuotaHasRoom(quotaView, item)}>
+                    {tableKindMeta(item).label}（剩 {quotaView[item].remaining} 个名额）
+                  </option>
+                ))}
+              </select>
+            </label>
+            <p className="small muted">{tableKindCapacityText(kind)}</p>
             {error ? <p className="error small">{error}</p> : null}
             <div className="row gap">
-              <button className="btn primary small" type="submit" disabled={busy || !name.trim()}>
+              <button
+                className="btn primary small"
+                type="submit"
+                disabled={busy || !name.trim() || !kindHasRoom}
+              >
                 {busy ? '创建中…' : '创建'}
               </button>
               <button className="btn ghost small" type="button" onClick={() => setCreating(false)}>
@@ -483,8 +607,12 @@ export function Sidebar({
             >
               <span>{database.icon || '📋'}</span>
               <span className="label">{database.name}</span>
+              {/* 表格类型徽标：基础 / 专业（专业表容量与保留时间都不限） */}
+              <span className={`kind-tag ${database.kind}`} title={tableKindCapacityText(database.kind)}>
+                {tableKindMeta(database.kind).shortLabel}
+              </span>
               {/* 容量条：左边记录、右边附件，剩余快用完时变黄 / 变红；点开是明细浮层 */}
-              <CapacityMeter name={database.name} capacity={database.capacity} onToast={onToast} />
+              <CapacityMeter name={database.name} capacity={database.capacity} />
               {database.locked ? (
                 <span className="small muted" title="结构已锁定">
                   🔒
@@ -557,11 +685,7 @@ export function Sidebar({
       ) : null}
 
       {quotaOpen ? (
-        <QuotaDialog
-          quota={quotaView}
-          onClose={() => setQuotaOpen(false)}
-          onBuy={(count) => onToast(`购买 ${count} 个表格的功能还在开发中，敬请期待`)}
-        />
+        <QuotaDialog quota={quotaView} onClose={() => setQuotaOpen(false)} onBuy={onBuyQuota} />
       ) : null}
 
       <div className="sidebar-foot">

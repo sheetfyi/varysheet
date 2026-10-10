@@ -311,54 +311,102 @@ export interface CellEditLocks {
 /* -------------------------------------------------------------- databases */
 
 /**
+ * 表格类型：基础表格（`basic`）/ 专业表格（`pro`）。
+ *
+ * 两类的区别（口径见 `src/shared/tableKind.ts`）：
+ *   容量     基础：500 条记录 / 1GB 附件        专业：不限
+ *   存储时间 基础：1 年（超期自动清除）          专业：永久保留
+ *   列数     基础：10 列                        专业：20 列
+ *   视图数   基础：3 个                         专业：10 个
+ * 名额也按类型分开算（见下面的 `TableQuotaSet`）。
+ */
+export type TableKind = 'basic' | 'pro';
+
+/**
  * 单表容量用量（记录条数 + 附件占用），随会话与表格详情一起下发。
  *
- * 上限按「表」计算（见 `src/worker/capacity.ts`，默认 500 条记录 / 1GB 附件），
- * 到上限后**只拦增长**：新建记录、批量新建、复制记录、上传附件会被 403
+ * 上限按「表」计算（见 `src/worker/capacity.ts`）：基础表格默认 500 条记录 / 1GB
+ * 附件（可用 `MAX_DATABASE_RECORDS` / `MAX_DATABASE_STORAGE_MB` 覆盖），专业表格
+ * 不限。到上限后**只拦增长**：新建记录、批量新建、复制记录、上传附件会被 403
  * `capacity_exceeded` 挡回去；查看、搜索、筛选、分页、增量同步、修改与删除
  * 已有记录都不受影响（清理掉一些数据后立刻又能新增）。
  */
 export interface DatabaseCapacity {
+  /** 表格类型：基础表格有容量与保留期上限，专业表格都不限 */
+  kind: TableKind;
+  /** true = 专业表格：记录数 / 附件 / 存储时间都不限制 */
+  unlimited: boolean;
+  /** 数据保留期（天）；0 = 永久保留（专业表格）。基础表格默认 365 天，超期自动清除 */
+  retentionDays: number;
   /** 该表的有效记录数（不含软删除归档的行） */
   records: number;
+  /** 记录数上限；`unlimited` 为 true 时是 0（= 不限） */
   maxRecords: number;
   /** 该表所有附件的大小之和（`files.size`） */
   storageBytes: number;
+  /** 附件上限（字节）；`unlimited` 为 true 时是 0（= 不限） */
   maxStorageBytes: number;
-  /** 记录数已达上限：不能再新建 / 批量新建 / 复制记录 */
+  /** 记录数已达上限：不能再新建 / 批量新建 / 复制记录（专业表格恒为 false） */
   recordsFull: boolean;
-  /** 附件已达上限：不能再上传附件 */
+  /** 附件已达上限：不能再上传附件（专业表格恒为 false） */
   storageFull: boolean;
   /** 任一维度到上限 = 这张表不能再增长（进度条转红 + 表格页显示只读提示） */
   atCapacity: boolean;
 }
 
 /**
- * 表格名额：这个账号还能再添加几张表格（侧边栏「你有 N 个表格可以添加」里的 N）。
+ * 表格名额：这个账号在**某一种**表格上还能再添加几张（侧边栏「你有 N 个基础表格可」）。
  *
  * 口径（计算见 `src/shared/quota.ts`，服务端在 `GET /api/quota` 里下发）：
- *   - 新注册账号 1 个名额；
- *   - 每分享一次表格（视图定向分享 / 公开链接 / 协作者）多 1 个；
- *   - 购买名额（购买功能还没上线，暂时恒为 0）。
- * 「已用」只算自己拥有的、未归档的表格，别人分享给你的表不算。
+ *   - 新注册账号没有默认名额；
+ *   - 每分享一次表格（视图定向分享 / 公开链接 / 协作者）多 1 个**同类型**名额；
+ *   - 购买名额：买几个就多几个（见 `table_purchases` 表）。
+ * 「已用」只算自己拥有的、未归档的、这一类型的表格，别人分享给你的表不算。
  */
 export interface TableQuota {
-  /** 已拥有的表格数（不含归档） */
+  /** 这一份名额属于哪一类表格 */
+  kind: TableKind;
+  /** 已拥有的这一类表格数（不含归档） */
   used: number;
-  /** 已分享出去的次数：视图定向分享 / 公开链接 / 协作者，各算一次 */
+  /** 已分享出去的这一类表格的次数：视图定向分享 / 公开链接 / 协作者，各算一次 */
   shared: number;
-  /** 通过购买得到的额外名额（购买功能还没上线，恒为 0） */
+  /** 这一类通过购买得到的名额（`table_purchases` 里同类型的 count 之和） */
   purchased: number;
-  /** 总名额 = 基础 1 + 分享次数 + 已购买 */
+  /** 总名额 = 默认 0 + 分享次数 + 已购买 */
   total: number;
   /** 还能再添加几张（用完为 0，不会出现负数） */
   remaining: number;
+}
+
+/** 两类表格各自的名额：`GET /api/quota`、会话下发与购买响应都用它 */
+export interface TableQuotaSet {
+  basic: TableQuota;
+  pro: TableQuota;
+}
+
+/**
+ * 一条购买记录（`table_purchases` 表）。
+ * 支付网关还没接入：现在点「购买」会直接写一条 `channel = 'self-serve'` 的流水并
+ * 立刻加名额，以后接支付时把订单号写进 `channel` / `note` 即可。
+ */
+export interface TablePurchase {
+  id: string;
+  userId: string;
+  kind: TableKind;
+  /** 这次买了几个名额 */
+  count: number;
+  /** 渠道：自助购买写 `self-serve`，以后可以写支付平台的订单号 */
+  channel: string;
+  note: string;
+  createdAt: number;
 }
 
 export interface DatabaseSummary {
   id: string;
   name: string;
   icon: string;
+  /** 表格类型：基础表格 / 专业表格（侧边栏列表里的徽标） */
+  kind: TableKind;
   description: string;
   ownerId: string;
   ownerName?: string;
@@ -382,6 +430,8 @@ export interface DatabaseDetail extends CellEditLocks {
   id: string;
   name: string;
   icon: string;
+  /** 表格类型：基础表格 / 专业表格（容量与列数 / 视图数上限都按它取） */
+  kind: TableKind;
   description: string;
   ownerId: string;
   role: Role;
@@ -514,6 +564,45 @@ export interface AdminUserListResponse {
   search: string;
 }
 
+/**
+ * 公开的品牌信息：`GET /api/branding`（未登录也能拿，用于页面标题 / favicon / 登录页）。
+ * 站点名称 / 图标由管理员在「后台 → 站点设置」里改，登录后也会随 `/api/session` 一起下发。
+ */
+export interface BrandingResponse {
+  siteName: string;
+  /** 站点图标地址（没上传过就是 null） */
+  iconUrl: string | null;
+  /** 设置最后修改时间（毫秒），作为图标地址的破缓存版本号 */
+  updatedAt: number;
+}
+
+/** 后台「站点设置」：`GET /api/admin/settings`（Resend 密钥只回传掩码，完整值不出服务端）。 */
+export interface AdminSettings {
+  siteName: string;
+  iconUrl: string | null;
+  hasIcon: boolean;
+  /** 生效中的超级管理员邮箱（该邮箱登录 / 带会话访问时会被自动提升为管理员） */
+  adminEmail: string;
+  /** 管理员邮箱是否来自 Worker 环境变量 / secret（数据库里没配） */
+  adminEmailFromEnv: boolean;
+  /** 密钥的掩码，例如 `re_ab…wxyz` */
+  resolvedResendApiKey: string;
+  resendApiKeyConfigured: boolean;
+  /** 密钥是否来自 Worker secret / .dev.vars（数据库里没配） */
+  resendApiKeyFromEnv: boolean;
+  resendFromEmail: string;
+  /** 代码里的默认值（前端提示「当前用的是默认值」时用） */
+  defaults: { siteName: string; adminEmail: string; resendFromEmail: string };
+  /** `settings` 表里最后修改时间（0 = 表里什么都没有） */
+  updatedAt: number;
+}
+
+/** 保存站点设置的响应：`PATCH /api/admin/settings`、图标上传 / 删除都用它。 */
+export interface AdminSettingsResponse {
+  settings: AdminSettings;
+  branding: BrandingResponse;
+}
+
 /** 管理员重置密码的响应：`password` 是新的（临时）密码，直接展示给管理员。 */
 export interface AdminPasswordResetResponse {
   ok: true;
@@ -556,6 +645,8 @@ export interface InviteDetail {
   expiresAt: number;
   expiresInSeconds: number;
   appName: string;
+  /** 站点图标地址（管理员上传过才有），登录页 / 邀请页的标题区用 */
+  siteIconUrl: string | null;
 }
 
 /**
@@ -617,6 +708,10 @@ export interface DatabaseListResponse {
   databases: DatabaseSummary[];
   user: SessionUser;
   maxUploadMb: number;
+  /** 站点名称（品牌） */
+  appName: string;
+  /** 站点图标地址（没上传过就是 null） */
+  siteIconUrl: string | null;
 }
 
 export interface PublicDatabaseResponse extends CellEditLocks {

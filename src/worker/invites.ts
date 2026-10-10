@@ -13,6 +13,7 @@
 import type { ViewInviteInfo } from '../shared/types';
 import { emailFailure, sendEmail, shouldEchoCode, viewInviteEmail } from './email';
 import { badGateway, newId, randomToken, sqlNullableNumber, sqlNumber, sqlString, type SqlRow } from './http';
+import { loadSiteSettings } from './settings';
 import type { Env } from './types';
 
 export type InviteRole = 'viewer' | 'editor';
@@ -170,13 +171,15 @@ export async function deliverViewInvite(
     ttlDays: INVITE_TTL_DAYS,
   };
 
-  if (shouldEchoCode(env, invite.email)) {
+  // 站点名称 / Resend 密钥 / 发件人都以「后台 → 站点设置」里的值为准
+  const settings = await loadSiteSettings(env);
+  if (shouldEchoCode(env, invite.email, settings)) {
     console.log(`[invite] ${invite.email} 的邀请链接是 ${url}（未发信：邮件服务未配置或测试域）`);
     return { ...base, emailDelivered: false, inviteUrl: url };
   }
 
-  const delivery = await sendEmail(env, {
-    ...viewInviteEmail(env, {
+  const delivery = await sendEmail(settings, {
+    ...viewInviteEmail(settings, {
       inviterName,
       databaseName,
       viewName,

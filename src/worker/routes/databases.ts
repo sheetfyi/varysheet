@@ -1,4 +1,6 @@
 /** /api/databases* - create / read / update tables, members and share links. */
+import { QUOTA_EXCEEDED } from '../../shared/quota';
+import { asTableKind, TABLE_KINDS, TABLE_LIMIT_EXCEEDED, tableKindLabel, tableKindMeta } from '../../shared/tableKind';
 import { TEMPLATES, materializeTemplateProperties } from '../../shared/templates';
 import type {
   DatabaseDetail,
@@ -7,12 +9,14 @@ import type {
   Property,
   Role,
   RowRecord,
+  TableKind,
   ViewDef,
 } from '../../shared/types';
 import { rowMatchesView } from '../../shared/viewFilter';
 import { defaultViewConfig } from '../../shared/views';
 import { requireDatabaseAccess, type DatabaseAccess } from '../access';
 import { requireUser } from '../auth';
+import { loadSiteSettings, siteIconUrl } from '../settings';
 import {
   capacityFromUsage,
   capacityLimits,
@@ -28,6 +32,7 @@ import {
   asString,
   badRequest,
   conflict,
+  forbidden,
   HttpError,
   json,
   newId,
@@ -40,6 +45,7 @@ import {
   type SqlRow,
 } from '../http';
 import { deliverViewInvite, issueViewInvite } from '../invites';
+import { loadTableQuota } from './quota';
 import {
   databaseSummaryFromRow,
   memberFromRow,
@@ -72,7 +78,7 @@ export function clampOffset(url: URL): number {
 export async function listDatabases(env: Env, userId: string): Promise<DatabaseSummary[]> {
   const [{ results }, { results: sharedRows }] = await Promise.all([
     env.DB.prepare(
-      `SELECT d.id, d.name, d.icon, d.description, d.owner_id, d.is_locked, d.created_at, d.updated_at,
+      `SELECT d.id, d.name, d.icon, d.kind, d.description, d.owner_id, d.is_locked, d.created_at, d.updated_at,
               u.name AS owner_name,
               ${DATABASE_USAGE_SELECT},
               CASE WHEN m.id IS NULL THEN 0 ELSE 1 END AS is_member,
@@ -106,9 +112,10 @@ export async function listDatabases(env: Env, userId: string): Promise<DatabaseS
     sharedViewNames.set(databaseId, list);
   }
 
-  const limits = capacityLimits(env);
   return (results ?? []).map((row) => {
     const role = sqlString(row, 'role', 'viewer') as Role;
+    // 容量上限按表格类型取：基础表格 500 条 / 1GB，专业表格不限（见 shared/tableKind.ts）
+    const kind = asTableKind(sqlString(row, 'kind', 'basic'));
     // 结果集只包含「所有者 / 表格成员 / 视图定向分享」三种来源：
     // 既不是所有者也不是成员（且能查出来）就说明访问权只来自定向分享的视图。
     const viewScoped = role !== 'owner' && sqlNumber(row, 'is_member') !== 1;
@@ -118,7 +125,7 @@ export async function listDatabases(env: Env, userId: string): Promise<DatabaseS
       sharedViewNames.get(sqlString(row, 'id')) ?? [],
       viewScoped,
       // 记录数 + 附件占用：和表格在同一个查询里算出来，避免一张表一次往返
-      capacityFromUsage(usageFromRow(row), limits),
+      capacityFromUsage(usageFromRow(row), capacityLimits(env, kind)),
     );
   });
 }
@@ -248,6 +255,8 @@ export interface CreateDatabaseOptions {
   icon: string;
   description: string;
   templateId: string;
+  /** 表格类型：基础表格 / 专业表格（名额与容量 / 列数 / 视图数上限都按它算） */
+  kind: TableKind;
 }
 
 export async function createDatabase(
@@ -261,9 +270,9 @@ export async function createDatabase(
 
   const statements = [
     env.DB.prepare(
-      `INSERT INTO databases (id, owner_id, name, icon, description, is_archived, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 0, ?, ?)`,
-    ).bind(databaseId, userId, options.name, options.icon, options.description, now, now),
+      `INSERT INTO databases (id, owner_id, name, icon, description, kind, is_archived, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+    ).bind(databaseId, userId, options.name, options.icon, options.description, options.kind, now, now),
   ];
 
   defs.forEach((def, index) => {
@@ -421,6 +430,8 @@ export async function buildDatabaseDetail(
     .bind(databaseId)
     .first<SqlRow>();
   if (!row) throw notFound('表格不存在');
+  // 表格类型：容量上限、保留期提示与前端徽标都按它走
+  const kind = asTableKind(sqlString(row, 'kind', 'basic'));
 
   // 增量同步的起点：**先**读版本号、再读数据（写入顺序是「先数据、后日志」，
   // 见 worker/changes.ts 的文件头），客户端拿它当游标就不会漏掉任何改动
@@ -457,13 +468,14 @@ export async function buildDatabaseDetail(
     env,
     page.rows.map((item) => item.id),
   );
-  // 单表容量用量：表格页顶部据此显示「已满，只能查看」的提示条
-  const capacity = await loadDatabaseCapacity(env, databaseId);
+  // 单表容量用量：表格页顶部据此显示「已满，只能查看」的提示条（专业表格不限容量）
+  const capacity = await loadDatabaseCapacity(env, databaseId, kind);
 
   return {
     id: databaseId,
     name: sqlString(row, 'name'),
     icon: sqlString(row, 'icon', '📋'),
+    kind,
     description: sqlString(row, 'description'),
     ownerId: sqlString(row, 'owner_id'),
     role: access.role,
@@ -517,12 +529,14 @@ export { TEMPLATES };
 
 async function listHandler(ctx: RequestContext): Promise<Response> {
   const user = await requireUser(ctx.request, ctx.env);
-  const databases = await listDatabases(ctx.env, user.id);
+  // 站点名称 / 图标由「后台 → 站点设置」决定（跟着表格列表一起下发，前端不用再单独请求）
+  const [databases, settings] = await Promise.all([listDatabases(ctx.env, user.id), loadSiteSettings(ctx.env)]);
   return json({
     databases,
     user,
     maxUploadMb: Number(ctx.env.MAX_UPLOAD_MB ?? 25),
-    appName: ctx.env.APP_NAME ?? 'Qafield',
+    appName: settings.siteName,
+    siteIconUrl: siteIconUrl(settings),
   });
 }
 
@@ -533,9 +547,30 @@ async function createHandler(ctx: RequestContext): Promise<Response> {
   const icon = asString(body.icon, '图标', { max: 8 }) || '📋';
   const description = asString(body.description, '描述', { max: 500 });
   const templateId = asString(body.templateId, '模板', { max: 40 }) || 'blank';
-  if (!TEMPLATES.some((template) => template.id === templateId)) throw notFound('模板不存在');
+  // 表格类型：老客户端不传就当基础表格
+  const kind = asEnum(body.kind ?? 'basic', TABLE_KINDS, '表格类型');
+  const template = TEMPLATES.find((item) => item.id === templateId);
+  if (!template) throw notFound('模板不存在');
+  // 模板自带的列数也不能超过这一类型的上限（基础 10 列 / 专业 20 列）
+  const meta = tableKindMeta(kind);
+  if (template.properties.length > meta.maxProperties) {
+    throw badRequest(
+      `${meta.label}最多 ${meta.maxProperties} 列，模板「${template.name}」有 ${template.properties.length} 列`,
+      TABLE_LIMIT_EXCEEDED,
+    );
+  }
 
-  const created = await createDatabase(ctx.env, user.id, { name, icon, description, templateId });
+  // 名额：基础表格与专业表格各算各的，这一类用完了就得先分享表格或购买名额。
+  // 名额口径见 src/shared/quota.ts（新注册账号默认 0 个名额）。
+  const quota = await loadTableQuota(ctx.env, user.id);
+  if (quota[kind].remaining <= 0) {
+    throw forbidden(
+      `${tableKindLabel(kind)}名额已用完（共 ${quota[kind].total} 个）：分享表格可以 +1，也可以直接购买名额`,
+      QUOTA_EXCEEDED,
+    );
+  }
+
+  const created = await createDatabase(ctx.env, user.id, { name, icon, description, templateId, kind });
   return json(await buildDatabaseDetail(ctx.env, created.databaseId, ownerAccess(created.databaseId, user.id), ctx.url), {
     status: 201,
   });

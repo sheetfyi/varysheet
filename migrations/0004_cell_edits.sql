@@ -1,4 +1,4 @@
--- Qafield - 单元格级「只能修改一次」（D1 / SQLite）
+-- Varysheet - 单元格级「只能修改一次」（D1 / SQLite）
 -- Applied with:  npx wrangler d1 migrations apply cloudnotion-db --local|--remote
 --
 -- 共享出来的可编辑用户（公开链接访客 / 被邀请的 editor / 视图定向分享的 editor）

@@ -1,9 +1,11 @@
 /** /api/views* - saved table / board / gallery views (filters, sorts, grouping). */
 import { FIELD_META } from '../../shared/fields';
+import { TABLE_LIMIT_EXCEEDED, tableKindMeta } from '../../shared/tableKind';
 import type { ViewConfig, ViewDef, ViewType } from '../../shared/types';
 import { defaultViewConfig, mergeViewConfig } from '../../shared/views';
 import { accessForView, assertStructureEditable, assertViewEditable, requireDatabaseAccess } from '../access';
 import { requireUser } from '../auth';
+import { loadDatabaseKind } from '../capacity';
 import { logChanges } from '../changes';
 import {
   asEnum,
@@ -14,6 +16,7 @@ import {
   newId,
   notFound,
   readJson,
+  sqlNumber,
   type SqlRow,
 } from '../http';
 import { viewFromRow } from '../mappers';
@@ -109,10 +112,30 @@ async function nextViewPosition(ctx: RequestContext, databaseId: string): Promis
   return (value === null || value === undefined ? 0 : Number(value)) + 1000;
 }
 
+/** 现有视图数：视图数上限的判断用 */
+async function countViews(ctx: RequestContext, databaseId: string): Promise<number> {
+  const row = await ctx.env.DB.prepare('SELECT COUNT(*) AS total FROM views WHERE database_id = ?')
+    .bind(databaseId)
+    .first<SqlRow>();
+  return sqlNumber(row ?? {}, 'total');
+}
+
 async function createViewHandler(ctx: RequestContext): Promise<Response> {
   const user = await requireUser(ctx.request, ctx.env);
   const access = await requireDatabaseAccess(ctx.env, ctx.params.id, user, 'edit');
   assertStructureEditable(access);
+
+  // 视图数上限：基础表格最多 3 个视图、专业表格 10 个（只拦新增 ——
+  // 已经超限的老表仍然能改名 / 改配置 / 删视图）
+  const meta = tableKindMeta(await loadDatabaseKind(ctx.env, ctx.params.id));
+  const viewCount = await countViews(ctx, ctx.params.id);
+  if (viewCount >= meta.maxViews) {
+    throw forbidden(
+      `${meta.label}最多 ${meta.maxViews} 个视图（当前 ${viewCount} 个）：删掉一些视图后再添加，或换成专业表格`,
+      TABLE_LIMIT_EXCEEDED,
+    );
+  }
+
   const body = await readJson(ctx.request);
 
   const type = asEnum(body.type ?? 'table', VIEW_TYPES, '视图类型');

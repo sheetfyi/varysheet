@@ -1,11 +1,16 @@
 /**
- * /api/admin/* —— 用户管理（仅超级管理员）。
+ * /api/admin/* —— 用户管理 + 站点设置（仅超级管理员）。
  *
  * 只有 `users.is_admin = 1` 的账号能访问，全部经过 `requireAdmin`：
  *   GET    /api/admin/users                注册用户列表（可按昵称 / 邮箱搜索、分页）
  *   PATCH  /api/admin/users/:id            修改某个用户的注册信息（昵称 / 邮箱）
  *   POST   /api/admin/users/:id/password   重置某个用户的密码（可指定，也可随机生成）
  *   POST   /api/admin/users/delete         批量删除账号（用户管理第一列的复选框 → 「删除选中」）
+ *   GET    /api/admin/settings             「站点设置」：站点名称 / 图标 / 管理员邮箱 / Resend 密钥与发件人
+ *   PATCH  /api/admin/settings             保存上面的设置（Resend 密钥只回传掩码）
+ *   POST   /api/admin/settings/icon        上传 / 替换站点图标（multipart，字段名 `file`）
+ *   DELETE /api/admin/settings/icon        移除站点图标
+ *   POST   /api/admin/maintenance/retention 立刻跑一次基础表格保留期清理（和定时任务同一套逻辑）
  *
  * 重置密码会让该用户在所有设备上立即下线，并尽力把新密码邮件通知给本人。
  * 删除账号会连同他拥有的表格（记录 / 备注 / 上传文件）一起清理，
@@ -14,6 +19,7 @@
 import { hashPassword, requireAdmin, validatePasswordStrength } from '../auth';
 import { MAX_DELETE_USERS, deleteAdminUsers, loadAdminUser, loadAdminUsers } from '../admin';
 import { passwordResetEmail, sendEmail, shouldEchoCode } from '../email';
+import { purgeExpiredBasicData } from '../retention';
 import {
   asString,
   badRequest,
@@ -25,6 +31,19 @@ import {
   sqlString,
   type SqlRow,
 } from '../http';
+import {
+  ICON_MIME_TYPES,
+  MAX_ICON_BYTES,
+  adminSettingsPayload,
+  brandingPayload,
+  clearSiteIcon,
+  loadSiteSettings,
+  normalizeAdminEmail,
+  normalizeFromAddress,
+  saveSiteIcon,
+  saveSiteSettings,
+  type SiteSettingsPatch,
+} from '../settings';
 import type { Route, RequestContext } from '../types';
 
 /** 大小写字母 + 数字，去掉了容易看错的 I l 1 O 0 */
@@ -113,10 +132,11 @@ async function resetUserPasswordHandler(ctx: RequestContext): Promise<Response> 
 
   // 尽力把新密码发到用户邮箱；没配邮件服务时不发信，直接把密码回显给管理员
   const email = sqlString(target, 'email');
+  const settings = await loadSiteSettings(ctx.env);
   let emailed = false;
-  if (!shouldEchoCode(ctx.env, email)) {
-    const delivery = await sendEmail(ctx.env, {
-      ...passwordResetEmail(ctx.env, { name: sqlString(target, 'name'), password }),
+  if (!shouldEchoCode(ctx.env, email, settings)) {
+    const delivery = await sendEmail(settings, {
+      ...passwordResetEmail(settings, { name: sqlString(target, 'name'), password }),
       to: email,
     });
     emailed = delivery.ok;
@@ -148,9 +168,93 @@ async function deleteUsersHandler(ctx: RequestContext): Promise<Response> {
   return json({ ok: true, ...result });
 }
 
+/* --------------------------------------------------------------- 站点设置 */
+
+/**
+ * 校验后台里粘贴的 Resend 密钥：去掉首尾空白，空串 = 清空（退回环境变量 / 不发信）。
+ * 只挡明显有问题的输入（换行、空格、超长），真正的合法性交给 Resend 那边报错。
+ */
+function normalizeApiKey(value: unknown): string {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw) return '';
+  if (/\s/.test(raw)) throw badRequest('Resend 密钥里不能有空格或换行');
+  if (raw.length > 200) throw badRequest('Resend 密钥太长，请检查是否复制多了');
+  return raw;
+}
+
+/** 「后台 → 站点设置」当前值：站点名称 / 图标 / 管理员邮箱 / Resend 密钥（掩码）与发件人。 */
+async function getSettingsHandler(ctx: RequestContext): Promise<Response> {
+  await requireAdmin(ctx.request, ctx.env);
+  return json({ settings: await adminSettingsPayload(ctx.env) });
+}
+
+/** 保存站点设置（只处理请求里出现过的字段，没出现的保持不动）。 */
+async function updateSettingsHandler(ctx: RequestContext): Promise<Response> {
+  await requireAdmin(ctx.request, ctx.env);
+  const body = await readJson(ctx.request);
+  const patch: SiteSettingsPatch = {};
+  if (body.siteName !== undefined) patch.siteName = asString(body.siteName, '站点名称', { required: true, max: 60 });
+  if (body.adminEmail !== undefined) patch.adminEmail = normalizeAdminEmail(body.adminEmail);
+  if (body.resendFromEmail !== undefined) patch.resendFromEmail = normalizeFromAddress(body.resendFromEmail);
+  if (body.resendApiKey !== undefined) patch.resendApiKey = normalizeApiKey(body.resendApiKey);
+  if (!Object.keys(patch).length) throw badRequest('没有需要保存的修改');
+
+  const settings = await saveSiteSettings(ctx.env, patch);
+  return json({ settings: await adminSettingsPayload(ctx.env), branding: brandingPayload(settings) });
+}
+
+/** 上传 / 替换站点图标（multipart 的 `file` 字段；覆盖 R2 里的同一个对象）。 */
+async function uploadSettingsIconHandler(ctx: RequestContext): Promise<Response> {
+  await requireAdmin(ctx.request, ctx.env);
+  const contentType = ctx.request.headers.get('content-type') ?? '';
+  if (!contentType.includes('multipart/form-data')) throw badRequest('请使用 multipart/form-data 上传图标');
+
+  let form: FormData;
+  try {
+    form = await ctx.request.formData();
+  } catch {
+    throw badRequest('表单解析失败');
+  }
+
+  const file = form.get('file');
+  if (!(file instanceof File)) throw badRequest('缺少 file 字段');
+  if (file.size === 0) throw badRequest('图标文件内容为空');
+  if (file.size > MAX_ICON_BYTES) throw badRequest(`图标不能超过 ${Math.round(MAX_ICON_BYTES / 1024)}KB`);
+
+  // 只收图片类型：图标会以 image/* 原样回给浏览器（配合全局 nosniff，不会当成页面执行）
+  const mime = (file.type || '').toLowerCase();
+  if (!ICON_MIME_TYPES.includes(mime)) {
+    throw badRequest('图标格式只支持 PNG / JPEG / WebP / GIF / AVIF / SVG / ICO');
+  }
+
+  const settings = await saveSiteIcon(ctx.env, file);
+  return json({ settings: await adminSettingsPayload(ctx.env), branding: brandingPayload(settings) });
+}
+
+/** 移除站点图标（前端会退回内置的默认标识）。 */
+async function deleteSettingsIconHandler(ctx: RequestContext): Promise<Response> {
+  await requireAdmin(ctx.request, ctx.env);
+  const settings = await clearSiteIcon(ctx.env);
+  return json({ settings: await adminSettingsPayload(ctx.env), branding: brandingPayload(settings) });
+}
+
+/**
+ * 运维入口：立刻跑一次「基础表格保留期清理」（每天 03:00 的定时任务是同一套逻辑）。
+ * 返回清掉的记录 / 附件数量，等不及定时任务时（或本地验证时）可以直接调它。
+ */
+async function maintenanceRetentionHandler(ctx: RequestContext): Promise<Response> {
+  await requireAdmin(ctx.request, ctx.env);
+  return json({ retention: await purgeExpiredBasicData(ctx.env) });
+}
+
 export const adminRoutes: Route[] = [
   { method: 'GET', path: '/api/admin/users', handler: listUsersHandler },
   { method: 'PATCH', path: '/api/admin/users/:id', handler: updateUserHandler },
   { method: 'POST', path: '/api/admin/users/:id/password', handler: resetUserPasswordHandler },
   { method: 'POST', path: '/api/admin/users/delete', handler: deleteUsersHandler },
+  { method: 'GET', path: '/api/admin/settings', handler: getSettingsHandler },
+  { method: 'PATCH', path: '/api/admin/settings', handler: updateSettingsHandler },
+  { method: 'POST', path: '/api/admin/settings/icon', handler: uploadSettingsIconHandler },
+  { method: 'DELETE', path: '/api/admin/settings/icon', handler: deleteSettingsIconHandler },
+  { method: 'POST', path: '/api/admin/maintenance/retention', handler: maintenanceRetentionHandler },
 ];

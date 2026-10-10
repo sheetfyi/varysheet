@@ -147,7 +147,17 @@ export function CellView({
     case 'url': {
       const href = typeof value === 'string' ? value : '';
       content = href ? (
-        <a className="link cell-text" href={href} target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()}>
+        // 列宽只由 <colgroup> 决定（见 styles.css 的「单元格不许按内容顶宽」），长网址会被
+        // 省略成「…」，所以这里补一个完整地址的悬停提示；只有「限制编辑」那两种状态例外，
+        // 那时按钮上的 title 要负责解释「为什么这格现在不能改」。
+        <a
+          className="link cell-text"
+          href={href}
+          target="_blank"
+          rel="noreferrer"
+          title={spent || graceMsLeft ? undefined : href}
+          onClick={(event) => event.stopPropagation()}
+        >
           {href}
         </a>
       ) : null;

@@ -4,14 +4,18 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
+  BrandingResponse,
   DatabaseDetail,
   DatabaseSummary,
   InboxMessage,
   InboxResponse,
   SessionUser,
-  TableQuota,
+  TableKind,
+  TableQuotaSet,
 } from '../shared/types';
+import { tableKindLabel } from '../shared/tableKind';
 import { ApiError, api, setSessionToken, type SessionPayload } from './api';
+import { applyBranding } from './branding';
 import { AdminPanel } from './components/AdminPanel';
 import { AuthPage } from './components/AuthPage';
 import { ChangePasswordDialog } from './components/ChangePasswordDialog';
@@ -20,6 +24,7 @@ import { InboxButton } from './components/InboxButton';
 import { InvitePage } from './components/InvitePage';
 import { PublicPage } from './components/PublicPage';
 import { Sidebar } from './components/Sidebar';
+import { SiteMark } from './components/SiteMark';
 import { UserChip } from './components/UserChip';
 
 interface ToastItem {
@@ -92,6 +97,7 @@ function summaryOf(detail: DatabaseDetail): DatabaseSummary {
     id: detail.id,
     name: detail.name,
     icon: detail.icon,
+    kind: detail.kind,
     description: detail.description,
     ownerId: detail.ownerId,
     role: detail.role,
@@ -109,11 +115,13 @@ export function App() {
   const shareToken = useMemo(shareTokenFromPath, []);
   const inviteToken = useMemo(inviteTokenFromPath, []);
   const [booting, setBooting] = useState(!shareToken && !inviteToken);
-  const [appName, setAppName] = useState('Qafield');
+  const [appName, setAppName] = useState('Varysheet');
+  /** 站点图标（管理员在后台传过才有）：`<title>` 与 favicon 也跟着它走 */
+  const [siteIconUrl, setSiteIconUrl] = useState<string | null>(null);
   const [user, setUser] = useState<SessionUser | null>(null);
   const [databases, setDatabases] = useState<DatabaseSummary[]>([]);
-  /** 表格名额（还能再添加几张表格）：侧边栏底部显示，登录与刷新列表时更新 */
-  const [quota, setQuota] = useState<TableQuota | null>(null);
+  /** 表格名额（基础 / 专业各自还能加几张）：侧边栏显示，登录与刷新列表时更新 */
+  const [quota, setQuota] = useState<TableQuotaSet | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [detail, setDetail] = useState<DatabaseDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -172,6 +180,23 @@ export function App() {
     };
   }, []);
 
+  /* ------------------------------------------------------------- 品牌标识 */
+
+  /** 「后台 → 站点设置」保存成功：立刻把新的站点名称 / 图标套到侧边栏标识、标题与 favicon 上 */
+  const applyBrandingChange = useCallback((branding: BrandingResponse) => {
+    setAppName(branding.siteName);
+    setSiteIconUrl(branding.iconUrl);
+  }, []);
+
+  /**
+   * 站点名称 / 图标跟着会话走（管理员在「后台 → 站点设置」里改完会重新拉会话）：
+   * 这里统一落到 `<title>` 与 favicon。公开分享页没有会话，那份由 `main.tsx`
+   * 启动时的 `/api/branding` 负责。
+   */
+  useEffect(() => {
+    applyBranding({ siteName: appName, iconUrl: siteIconUrl });
+  }, [appName, siteIconUrl]);
+
   /* ----------------------------------------------------------- 会话与数据 */
 
   /**
@@ -188,6 +213,7 @@ export function App() {
       try {
         const payload = await api.session();
         setAppName(payload.appName);
+        setSiteIconUrl(payload.siteIconUrl ?? null);
         setUser(payload.user);
         setDatabases(payload.databases);
         // 会话里带着名额：侧边栏一进来就能显示「还能添加几个表格」
@@ -369,15 +395,18 @@ export function App() {
   }, []);
 
   const createDatabase = useCallback(
-    /** 新建表格固定走「空白表格」模板（不传 templateId 时后端就是 blank），不再让用户挑选模板 */
-    async ({ name }: { name: string }) => {
-      const created = await api.createDatabase({ name });
+    /**
+     * 新建表格固定走「空白表格」模板（不传 templateId 时后端就是 blank），不再让用户
+     * 挑选模板；表格类型（基础 / 专业）由侧边栏的表单选，名额按类型扣。
+     */
+    async ({ name, kind }: { name: string; kind: TableKind }) => {
+      const created = await api.createDatabase({ name, kind });
       setDatabases((prev) => [summaryOf(created), ...prev.filter((item) => item.id !== created.id)]);
       setDetail(created);
       setActiveId(created.id);
       if (narrow) setSidebarOpen(false);
-      toast(`已创建「${created.name}」`);
-      // 新建表格会占掉一个名额：顺手刷新侧边栏底部的「还能添加几个」
+      toast(`已创建${tableKindLabel(created.kind)}「${created.name}」`);
+      // 新建表格会占掉一个名额：顺手刷新侧边栏的「还能添加几个」
       void api
         .quota()
         .then((next) => setQuota(next.quota))
@@ -385,6 +414,16 @@ export function App() {
         .catch(() => undefined);
     },
     [narrow, toast],
+  );
+
+  /** 购买表格名额：服务端写一条购买流水并立刻加名额，成功后刷新侧边栏的数字 */
+  const buyQuota = useCallback(
+    async ({ kind, count }: { kind: TableKind; count: number }) => {
+      const result = await api.purchaseQuota({ kind, count });
+      setQuota(result.quota);
+      toast(`已购买 ${count} 个${tableKindLabel(kind)}名额，现在可以添加了`);
+    },
+    [toast],
   );
 
   const logout = useCallback(async () => {
@@ -465,13 +504,14 @@ export function App() {
         </div>
       );
     }
-    return <AuthPage appName={appName} onAuthenticated={reauthenticate} />;
+    return <AuthPage appName={appName} siteIconUrl={siteIconUrl} onAuthenticated={reauthenticate} />;
   }
 
   return (
     <div className={`app-shell${sidebarOpen ? '' : ' sidebar-collapsed'}${narrow ? ' narrow' : ''}`}>
       <Sidebar
         appName={appName}
+        siteIconUrl={siteIconUrl}
         user={user}
         databases={databases}
         quota={quota}
@@ -499,7 +539,7 @@ export function App() {
         }}
         onInboxRefresh={() => void refreshInbox()}
         onInboxSelect={(message) => void openInboxMessage(message)}
-        onToast={toast}
+        onBuyQuota={buyQuota}
       />
 
       {narrow && sidebarOpen ? (
@@ -519,7 +559,7 @@ export function App() {
             >
               {sidebarOpen ? '«' : '☰'}
             </button>
-            <span className="brand">{appName}</span>
+            <SiteMark appName={appName} siteIconUrl={siteIconUrl} className="brand" />
             {/* 侧边栏收起时，收件箱标志挪到顶部条（看不到侧边栏左上角的那个） */}
             {!sidebarOpen ? (
               <InboxButton
@@ -557,7 +597,12 @@ export function App() {
         ) : null}
 
         {adminView ? (
-          <AdminPanel me={user} onToast={toast} onReloadSession={() => void bootstrapSession()} />
+          <AdminPanel
+            me={user}
+            onToast={toast}
+            onReloadSession={() => void bootstrapSession()}
+            onBrandingChange={applyBrandingChange}
+          />
         ) : detail ? (
           <DatabasePage
             key={detail.id}
@@ -604,7 +649,9 @@ export function App() {
         ) : (
           <div className="centered">
             <div className="empty-state">
-              <h2>{appName}</h2>
+              <h2>
+                <SiteMark appName={appName} siteIconUrl={siteIconUrl} />
+              </h2>
               <p className="muted">从左侧选择一个表格，或点击 ＋ 新建一个。</p>
               {!sidebarOpen ? (
                 <div className="empty-actions">

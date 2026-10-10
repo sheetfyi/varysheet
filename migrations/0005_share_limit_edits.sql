@@ -1,4 +1,4 @@
--- Qafield - 「限制编辑」改为分享时的可选项（D1 / SQLite）
+-- Varysheet - 「限制编辑」改为分享时的可选项（D1 / SQLite）
 -- Applied with:  npx wrangler d1 migrations apply cloudnotion-db --local|--remote
 --
 -- 之前：所有共享出来的可编辑访问者（公开链接访客 / 视图定向分享的 editor）

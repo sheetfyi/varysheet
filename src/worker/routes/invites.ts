@@ -11,6 +11,7 @@
 import type { InviteAcceptResponse, InviteDetail } from '../../shared/types';
 import { assertSignupAllowed, createSession, hashPassword, isSecureRequest, sessionCookie, sessionTokenPayload, validatePasswordStrength, wantsTokenInBody } from '../auth';
 import { consumeInvite, inviteContext, loadInviteByToken, type ViewInviteRecord } from '../invites';
+import { loadSiteSettings, siteIconUrl } from '../settings';
 import {
   HttpError,
   asString,
@@ -64,6 +65,8 @@ async function applyViewShare(env: Env, invite: ViewInviteRecord, userId: string
 async function inviteDetailHandler(ctx: RequestContext): Promise<Response> {
   const invite = await requireInvite(ctx);
   const { databaseName, viewName, inviterName } = await inviteContext(ctx.env, invite);
+  // 站点名称 / 图标由「后台 → 站点设置」决定（受邀人还没登录，也要看到正确的品牌）
+  const settings = await loadSiteSettings(ctx.env);
   const detail: InviteDetail = {
     email: invite.email,
     role: invite.role,
@@ -73,7 +76,8 @@ async function inviteDetailHandler(ctx: RequestContext): Promise<Response> {
     inviterName,
     expiresAt: invite.expiresAt,
     expiresInSeconds: Math.max(0, Math.round((invite.expiresAt - Date.now()) / 1000)),
-    appName: ctx.env.APP_NAME ?? 'Qafield',
+    appName: settings.siteName,
+    siteIconUrl: siteIconUrl(settings),
   };
   return json({ invite: detail });
 }

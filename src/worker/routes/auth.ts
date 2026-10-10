@@ -44,6 +44,7 @@ import {
   type SqlRow,
 } from '../http';
 import type { Route, RequestContext, AuthedUser } from '../types';
+import { loadSiteSettings, siteIconUrl } from '../settings';
 import { listDatabases } from './databases';
 import { loadTableQuota } from './quota';
 
@@ -68,13 +69,15 @@ async function deliverSignupCode(
     expiresInSeconds: Math.max(0, Math.round((issued.expiresAt - Date.now()) / 1000)),
   };
 
-  if (shouldEchoCode(ctx.env, email)) {
+  // 站点名称 / Resend 密钥 / 发件人都以「后台 → 站点设置」里的值为准
+  const settings = await loadSiteSettings(ctx.env);
+  if (shouldEchoCode(ctx.env, email, settings)) {
     console.log(`[signup] ${email} 的确认码是 ${issued.code}（未发信：邮件服务未配置或测试域）`);
     return json({ pending: true, ...base, emailDelivered: false, devCode: issued.code }, { status: 202 });
   }
 
-  const delivery = await sendEmail(ctx.env, {
-    ...verificationCodeEmail(ctx.env, { code: issued.code, name, minutes: issued.ttlMinutes }),
+  const delivery = await sendEmail(settings, {
+    ...verificationCodeEmail(settings, { code: issued.code, name, minutes: issued.ttlMinutes }),
     to: email,
   });
   if (!delivery.ok) emailFailure(delivery);
@@ -162,8 +165,9 @@ async function loginHandler(ctx: RequestContext): Promise<Response> {
   const email = normalizeEmail(body.email);
   const password = asString(body.password, '密码', { required: true, max: 200 });
 
-  // ADMIN_EMAIL 指定的账号在这里被创建 / 提升为管理员（每个 isolate 只真正跑一次）
-  await ensureAdminUser(env);
+  // 后台「站点设置」里配置的管理员邮箱（没有就用 ADMIN_EMAIL / 默认值）在这里被创建 / 提升为管理员
+  const settings = await loadSiteSettings(env);
+  await ensureAdminUser(env, settings.adminEmail);
 
   const row = await env.DB.prepare('SELECT id, email, name, password_hash, is_admin FROM users WHERE email = ?')
     .bind(email)
@@ -232,10 +236,13 @@ async function changePasswordHandler(ctx: RequestContext): Promise<Response> {
 }
 
 async function sessionHandler(ctx: RequestContext): Promise<Response> {
-  // 管理员账号的引导只依赖环境变量，这里顺带跑一次，保证提升后重新加载页面就能看到「用户管理」
-  await ensureAdminUser(ctx.env);
+  // 品牌信息（站点名称 / 图标）跟在会话里一起下发，前端不用再多打一次 /api/branding
+  const settings = await loadSiteSettings(ctx.env);
+  // 管理员账号的引导：后台里改过管理员邮箱就立刻生效，重新加载页面就能看到「用户管理」
+  await ensureAdminUser(ctx.env, settings.adminEmail);
 
   const user = await getCurrentUser(ctx.request, ctx.env);
+  const branding = { appName: settings.siteName, siteIconUrl: siteIconUrl(settings) };
   if (!user) {
     return json({
       ...sessionResponse(null),
@@ -243,7 +250,7 @@ async function sessionHandler(ctx: RequestContext): Promise<Response> {
       // 没登录就没有名额可谈（客户端只在有 `user` 时才读它）
       quota: null,
       maxUploadMb: Number(ctx.env.MAX_UPLOAD_MB ?? 25),
-      appName: ctx.env.APP_NAME ?? 'Qafield',
+      ...branding,
     });
   }
   // 表格列表与表格名额一起下发：侧边栏底部要显示「还能添加几张表格」
@@ -256,7 +263,7 @@ async function sessionHandler(ctx: RequestContext): Promise<Response> {
     databases,
     quota,
     maxUploadMb: Number(ctx.env.MAX_UPLOAD_MB ?? 25),
-    appName: ctx.env.APP_NAME ?? 'Qafield',
+    ...branding,
   });
 }
 
