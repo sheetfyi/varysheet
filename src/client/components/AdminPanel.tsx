@@ -11,6 +11,7 @@ import type { AdminUser, BrandingResponse, SessionUser } from '../../shared/type
 import { ApiError, api } from '../api';
 import { EditUserDialog } from './EditUserDialog';
 import { ResetResultCard, type ResetResult } from './ResetResultCard';
+import { ShardsCard } from './ShardsCard';
 import { SiteSettingsCard } from './SiteSettingsCard';
 
 interface AdminPanelProps {
@@ -140,6 +141,8 @@ export function AdminPanel({ me, onToast, onReloadSession, onBrandingChange }: A
         onBrandingChange={onBrandingChange}
         onReloadSession={onReloadSession}
       />
+
+      <ShardsCard onToast={onToast} />
 
       <div className="admin-head">
         <h2 className="page-title">用户管理</h2>

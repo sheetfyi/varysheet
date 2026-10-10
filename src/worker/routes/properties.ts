@@ -21,6 +21,7 @@ import {
   type SqlRow,
 } from '../http';
 import { propertyFromRow } from '../mappers';
+import { tableDb } from '../shards';
 import type { RequestContext, Route } from '../types';
 import { loadProperties, touchDatabase } from './databases';
 
@@ -101,15 +102,14 @@ export function normalizeConfig(type: FieldType, raw: unknown, existing: Propert
 
 /** Re-normalise all stored values of a property (used when its type changes). */
 async function migrateValues(
-  ctx: RequestContext,
+  db: D1Database,
   databaseId: string,
   propertyId: string,
   type: FieldType,
   config: PropertyConfig,
 ): Promise<number> {
-  const { results } = await ctx.env.DB.prepare(
-    'SELECT id, "values" FROM records WHERE database_id = ? AND is_archived = 0 LIMIT 5000',
-  )
+  const { results } = await db
+    .prepare('SELECT id, "values" FROM records WHERE database_id = ? AND is_archived = 0 LIMIT 5000')
     .bind(databaseId)
     .all<SqlRow>();
   const updates: D1PreparedStatement[] = [];
@@ -125,26 +125,26 @@ async function migrateValues(
     if (next === null) delete values[propertyId];
     else values[propertyId] = next;
     updates.push(
-      ctx.env.DB.prepare('UPDATE records SET "values" = ? WHERE id = ?')
+      db.prepare('UPDATE records SET "values" = ? WHERE id = ?')
         .bind(JSON.stringify(values), sqlString(row, 'id')),
     );
   }
-  if (updates.length) await ctx.env.DB.batch(updates);
+  if (updates.length) await db.batch(updates);
   return updates.length;
 }
 
-async function nextPosition(ctx: RequestContext, databaseId: string): Promise<number> {
-  const row = await ctx.env.DB.prepare(
-    'SELECT MAX(position) AS max_position FROM properties WHERE database_id = ?',
-  )
+async function nextPosition(db: D1Database, databaseId: string): Promise<number> {
+  const row = await db
+    .prepare('SELECT MAX(position) AS max_position FROM properties WHERE database_id = ?')
     .bind(databaseId)
     .first<SqlRow>();
   return sqlNumber(row ?? {}, 'max_position', 0) + 1000;
 }
 
 /** 现有字段（列）数：列数上限的判断用 */
-async function countProperties(ctx: RequestContext, databaseId: string): Promise<number> {
-  const row = await ctx.env.DB.prepare('SELECT COUNT(*) AS total FROM properties WHERE database_id = ?')
+async function countProperties(db: D1Database, databaseId: string): Promise<number> {
+  const row = await db
+    .prepare('SELECT COUNT(*) AS total FROM properties WHERE database_id = ?')
     .bind(databaseId)
     .first<SqlRow>();
   return sqlNumber(row ?? {}, 'total');
@@ -152,13 +152,14 @@ async function countProperties(ctx: RequestContext, databaseId: string): Promise
 
 async function createPropertyHandler(ctx: RequestContext): Promise<Response> {
   const user = await requireUser(ctx.request, ctx.env);
-  const access = await requireDatabaseAccess(ctx.env, ctx.params.id, user, 'edit');
+  const access = await requireDatabaseAccess(ctx, ctx.params.id, user, 'edit');
   assertStructureEditable(access);
+  const db = tableDb(ctx);
 
   // 列数上限：基础表格最多 10 列、专业表格 20 列（只拦新增 —— 已经超限的老表
   // 仍然能改名 / 改类型 / 删列，不然用户没法把它收拾回上限以内）
-  const meta = tableKindMeta(await loadDatabaseKind(ctx.env, ctx.params.id));
-  const columns = await countProperties(ctx, ctx.params.id);
+  const meta = tableKindMeta(await loadDatabaseKind(db, ctx.params.id));
+  const columns = await countProperties(db, ctx.params.id);
   if (columns >= meta.maxProperties) {
     throw forbidden(
       `${meta.label}最多 ${meta.maxProperties} 列（当前 ${columns} 列）：删掉一些字段后再添加，或换成专业表格`,
@@ -175,15 +176,16 @@ async function createPropertyHandler(ctx: RequestContext): Promise<Response> {
     ? Number(body.width)
     : FIELD_META[type].defaultWidth;
   const position =
-    body.position === undefined ? await nextPosition(ctx, ctx.params.id) : asNumberValue(body.position, 'position');
+    body.position === undefined ? await nextPosition(db, ctx.params.id) : asNumberValue(body.position, 'position');
 
   const propertyId = newId();
   const locked = body.locked === true ? 1 : 0;
   const now = Date.now();
-  await ctx.env.DB.prepare(
-    `INSERT INTO properties (id, database_id, name, type, config, is_locked, position, width, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  )
+  await db
+    .prepare(
+      `INSERT INTO properties (id, database_id, name, type, config, is_locked, position, width, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
     .bind(
       propertyId,
       ctx.params.id,
@@ -197,20 +199,22 @@ async function createPropertyHandler(ctx: RequestContext): Promise<Response> {
       now,
     )
     .run();
-  await touchDatabase(ctx.env, ctx.params.id);
+  await touchDatabase(db, ctx.params.id);
   // 结构变了（多 / 少了一个字段）：别人的表格页整表刷新一次
-  await logChanges(ctx.env, ctx.params.id, 'schema');
+  await logChanges(db, ctx.params.id, 'schema');
 
-  return json({ properties: await loadProperties(ctx.env, ctx.params.id), propertyId }, { status: 201 });
+  return json({ properties: await loadProperties(db, ctx.params.id), propertyId }, { status: 201 });
 }
 
 async function updatePropertyHandler(ctx: RequestContext): Promise<Response> {
   const user = await requireUser(ctx.request, ctx.env);
-  const access = await accessForProperty(ctx.env, ctx.params.id, user, 'edit');
+  const access = await accessForProperty(ctx, ctx.params.id, user, 'edit');
   assertStructureEditable(access);
+  const db = tableDb(ctx);
   const body = await readJson(ctx.request);
 
-  const row = await ctx.env.DB.prepare('SELECT * FROM properties WHERE id = ?')
+  const row = await db
+    .prepare('SELECT * FROM properties WHERE id = ?')
     .bind(ctx.params.id)
     .first<SqlRow>();
   if (!row) throw notFound('字段不存在');
@@ -253,47 +257,48 @@ async function updatePropertyHandler(ctx: RequestContext): Promise<Response> {
     values.push(body.locked ? 1 : 0);
   }
   if (!fields.length) {
-    return json({ property: current, properties: await loadProperties(ctx.env, access.databaseId) });
+    return json({ property: current, properties: await loadProperties(db, access.databaseId) });
   }
 
   fields.push('updated_at = ?');
   values.push(Date.now(), ctx.params.id);
-  await ctx.env.DB.prepare(`UPDATE properties SET ${fields.join(', ')} WHERE id = ?`)
+  await db.prepare(`UPDATE properties SET ${fields.join(', ')} WHERE id = ?`)
     .bind(...values)
     .run();
   // 字段改名 / 改类型 / 改宽 / 排序 / 锁定：结构改动，别人那边整表重载
-  await logChanges(ctx.env, access.databaseId, 'schema');
+  await logChanges(db, access.databaseId, 'schema');
 
   let migrated = 0;
   if (typeChanged) {
-    migrated = await migrateValues(ctx, access.databaseId, ctx.params.id, nextType, nextConfig);
+    migrated = await migrateValues(db, access.databaseId, ctx.params.id, nextType, nextConfig);
   }
-  await touchDatabase(ctx.env, access.databaseId);
+  await touchDatabase(db, access.databaseId);
 
-  const updated = await ctx.env.DB.prepare('SELECT * FROM properties WHERE id = ?')
+  const updated = await db
+    .prepare('SELECT * FROM properties WHERE id = ?')
     .bind(ctx.params.id)
     .first<SqlRow>();
   return json({
     property: updated ? propertyFromRow(updated) : current,
-    properties: await loadProperties(ctx.env, access.databaseId),
+    properties: await loadProperties(db, access.databaseId),
     migrated,
   });
 }
 
 async function deletePropertyHandler(ctx: RequestContext): Promise<Response> {
   const user = await requireUser(ctx.request, ctx.env);
-  const access = await accessForProperty(ctx.env, ctx.params.id, user, 'edit');
+  const access = await accessForProperty(ctx, ctx.params.id, user, 'edit');
   assertStructureEditable(access);
+  const db = tableDb(ctx);
 
-  const properties = await loadProperties(ctx.env, access.databaseId);
+  const properties = await loadProperties(db, access.databaseId);
   if (properties.length <= 1) throw badRequest('至少需要保留一个字段');
 
-  await ctx.env.DB.prepare('DELETE FROM properties WHERE id = ?').bind(ctx.params.id).run();
+  await db.prepare('DELETE FROM properties WHERE id = ?').bind(ctx.params.id).run();
 
   // drop the now orphaned cell values
-  const { results } = await ctx.env.DB.prepare(
-    'SELECT id, "values" FROM records WHERE database_id = ? AND is_archived = 0 LIMIT 5000',
-  )
+  const { results } = await db
+    .prepare('SELECT id, "values" FROM records WHERE database_id = ? AND is_archived = 0 LIMIT 5000')
     .bind(access.databaseId)
     .all<SqlRow>();
   const updates: D1PreparedStatement[] = [];
@@ -307,15 +312,15 @@ async function deletePropertyHandler(ctx: RequestContext): Promise<Response> {
     if (!(ctx.params.id in values)) continue;
     delete values[ctx.params.id];
     updates.push(
-      ctx.env.DB.prepare('UPDATE records SET "values" = ? WHERE id = ?')
+      db.prepare('UPDATE records SET "values" = ? WHERE id = ?')
         .bind(JSON.stringify(values), sqlString(record, 'id')),
     );
   }
-  if (updates.length) await ctx.env.DB.batch(updates);
+  if (updates.length) await db.batch(updates);
 
-  await touchDatabase(ctx.env, access.databaseId);
-  await logChanges(ctx.env, access.databaseId, 'schema');
-  return json({ properties: await loadProperties(ctx.env, access.databaseId) });
+  await touchDatabase(db, access.databaseId);
+  await logChanges(db, access.databaseId, 'schema');
+  return json({ properties: await loadProperties(db, access.databaseId) });
 }
 
 export const propertyRoutes: Route[] = [

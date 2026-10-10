@@ -55,7 +55,8 @@ import {
   viewFromRow,
   viewShareFromRow,
 } from '../mappers';
-import { loadNotes, mentionableUsers } from '../notes';
+import { loadNotes, loadUserContacts, mentionableUsers, type UserContact } from '../notes';
+import { forEachShardSafe, pickShard, requireEntityShard, shardDb, tableDb } from '../shards';
 import type { Env, RequestContext, Route } from '../types';
 
 const DEFAULT_PAGE_SIZE = 200;
@@ -74,45 +75,66 @@ export function clampOffset(url: URL): number {
   return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
 }
 
-/** All databases the user owns, has been invited to or received a view share for. */
+/**
+ * All databases the user owns, has been invited to or received a view share for.
+ *
+ * 表格数据在各个分片里：逐分片查一遍再合并（某个分片暂时不可用只会少几张表，不会 500）。
+ * 表格名 / 视图名 / 用量都在分片内一次查完，只有 `owner_name` 要去用户库补 —— 跨库没有
+ * JOIN，所以是「两次查询 + JS 合并」。
+ */
 export async function listDatabases(env: Env, userId: string): Promise<DatabaseSummary[]> {
-  const [{ results }, { results: sharedRows }] = await Promise.all([
-    env.DB.prepare(
-      `SELECT d.id, d.name, d.icon, d.kind, d.description, d.owner_id, d.is_locked, d.created_at, d.updated_at,
-              u.name AS owner_name,
-              ${DATABASE_USAGE_SELECT},
-              CASE WHEN m.id IS NULL THEN 0 ELSE 1 END AS is_member,
-              CASE WHEN d.owner_id = ? THEN 'owner'
-                   ELSE COALESCE(m.role, s.role, 'viewer') END AS role
-         FROM databases d
-         JOIN users u ON u.id = d.owner_id
-         LEFT JOIN database_members m ON m.database_id = d.id AND m.user_id = ?
-         LEFT JOIN (SELECT vs.database_id, MIN(vs.role) AS role FROM view_shares vs
-                     WHERE vs.user_id = ? GROUP BY vs.database_id) s ON s.database_id = d.id
-        WHERE d.is_archived = 0 AND (d.owner_id = ? OR m.id IS NOT NULL OR s.database_id IS NOT NULL)
-        ORDER BY d.updated_at DESC`,
-    )
-      .bind(userId, userId, userId, userId)
-      .all<SqlRow>(),
-    env.DB.prepare(
-      `SELECT vs.database_id, v.name AS view_name
-         FROM view_shares vs JOIN views v ON v.id = vs.view_id
-        WHERE vs.user_id = ?
-        ORDER BY v.position ASC, vs.created_at ASC`,
-    )
-      .bind(userId)
-      .all<SqlRow>(),
-  ]);
+  const scans = await forEachShardSafe(env, async (_shard, db) => {
+    const [{ results }, { results: sharedRows }] = await Promise.all([
+      db
+        .prepare(
+          `SELECT d.id, d.name, d.icon, d.kind, d.description, d.owner_id, d.is_locked, d.created_at, d.updated_at,
+                  ${DATABASE_USAGE_SELECT},
+                  CASE WHEN m.id IS NULL THEN 0 ELSE 1 END AS is_member,
+                  CASE WHEN d.owner_id = ? THEN 'owner'
+                       ELSE COALESCE(m.role, s.role, 'viewer') END AS role
+             FROM databases d
+             LEFT JOIN database_members m ON m.database_id = d.id AND m.user_id = ?
+             LEFT JOIN (SELECT vs.database_id, MIN(vs.role) AS role FROM view_shares vs
+                          WHERE vs.user_id = ? GROUP BY vs.database_id) s ON s.database_id = d.id
+            WHERE d.is_archived = 0 AND (d.owner_id = ? OR m.id IS NOT NULL OR s.database_id IS NOT NULL)`,
+        )
+        .bind(userId, userId, userId, userId)
+        .all<SqlRow>(),
+      db
+        .prepare(
+          `SELECT vs.database_id, v.name AS view_name
+             FROM view_shares vs JOIN views v ON v.id = vs.view_id
+            WHERE vs.user_id = ?
+            ORDER BY v.position ASC, vs.created_at ASC`,
+        )
+        .bind(userId)
+        .all<SqlRow>(),
+    ]);
+    return { rows: results ?? [], sharedRows: sharedRows ?? [] };
+  });
 
+  const rows: SqlRow[] = [];
   const sharedViewNames = new Map<string, string[]>();
-  for (const row of sharedRows ?? []) {
-    const databaseId = sqlString(row, 'database_id');
-    const list = sharedViewNames.get(databaseId) ?? [];
-    list.push(sqlString(row, 'view_name'));
-    sharedViewNames.set(databaseId, list);
+  for (const scan of scans) {
+    if (!scan.value) continue;
+    rows.push(...scan.value.rows);
+    for (const row of scan.value.sharedRows) {
+      const id = sqlString(row, 'database_id');
+      const list = sharedViewNames.get(id) ?? [];
+      list.push(sqlString(row, 'view_name'));
+      sharedViewNames.set(id, list);
+    }
+  }
+  // 同一张表只会落在一个分片里；原来的 SQL 排序（updated_at 倒序）在合并后重做
+  rows.sort((a, b) => sqlNumber(b, 'updated_at') - sqlNumber(a, 'updated_at'));
+
+  // owner_name 在用户库：跨库补一次
+  const owners = await loadUserContacts(env, rows.map((row) => sqlString(row, 'owner_id')));
+  for (const row of rows) {
+    row.owner_name = ownerLabel(owners.get(sqlString(row, 'owner_id')));
   }
 
-  return (results ?? []).map((row) => {
+  return rows.map((row) => {
     const role = sqlString(row, 'role', 'viewer') as Role;
     // 容量上限按表格类型取：基础表格 500 条 / 1GB，专业表格不限（见 shared/tableKind.ts）
     const kind = asTableKind(sqlString(row, 'kind', 'basic'));
@@ -130,6 +152,11 @@ export async function listDatabases(env: Env, userId: string): Promise<DatabaseS
   });
 }
 
+/** 用户库里查到的账号 → 表格列表上的「所有者」显示名（注销的账号给一句占位文案）。 */
+export function ownerLabel(contact: UserContact | undefined): string {
+  return contact ? contact.name || contact.email : '已注销用户';
+}
+
 /** Union of the fields that the given (shared) views expose. */
 function scopedProperties(properties: Property[], views: ViewDef[]): Property[] {
   if (!views.some((view) => view.config.visibleProperties)) return properties;
@@ -142,7 +169,7 @@ function scopedProperties(properties: Property[], views: ViewDef[]): Property[] 
 
 /** Rows a view-scoped member may see: the union of every view they were given. */
 export async function visibleRecords(
-  env: Env,
+  db: D1Database,
   databaseId: string,
   access: Pick<DatabaseAccess, 'viewIds' | 'userId'>,
   limit: number,
@@ -150,16 +177,16 @@ export async function visibleRecords(
 ): Promise<{ rows: RowRecord[]; total: number }> {
   if (!access.viewIds?.length) {
     const [rows, total] = await Promise.all([
-      loadRecords(env, databaseId, limit, offset),
-      countRecords(env, databaseId),
+      loadRecords(db, databaseId, limit, offset),
+      countRecords(db, databaseId),
     ]);
     return { rows, total };
   }
 
   const [properties, views, scanned] = await Promise.all([
-    loadProperties(env, databaseId),
-    loadViews(env, databaseId, access.viewIds),
-    loadRecords(env, databaseId, SCOPED_ROW_SCAN, 0),
+    loadProperties(db, databaseId),
+    loadViews(db, databaseId, access.viewIds),
+    loadRecords(db, databaseId, SCOPED_ROW_SCAN, 0),
   ]);
   if (!views.length) return { rows: [], total: 0 };
 
@@ -172,19 +199,19 @@ export async function visibleRecords(
   return { rows: rows.slice(offset, offset + limit), total: rows.length };
 }
 
-export async function loadProperties(env: Env, databaseId: string): Promise<Property[]> {
-  const { results } = await env.DB.prepare(
-    'SELECT * FROM properties WHERE database_id = ? ORDER BY position ASC, created_at ASC',
-  )
+/** 表格的字段（`db` = 表格所在的分片）。 */
+export async function loadProperties(db: D1Database, databaseId: string): Promise<Property[]> {
+  const { results } = await db
+    .prepare('SELECT * FROM properties WHERE database_id = ? ORDER BY position ASC, created_at ASC')
     .bind(databaseId)
     .all<SqlRow>();
   return (results ?? []).map(propertyFromRow);
 }
 
-export async function loadViews(env: Env, databaseId: string, viewIds?: string[] | null): Promise<ViewDef[]> {
-  const { results } = await env.DB.prepare(
-    'SELECT * FROM views WHERE database_id = ? ORDER BY position ASC, created_at ASC',
-  )
+/** 表格的视图（`db` = 表格所在的分片）。 */
+export async function loadViews(db: D1Database, databaseId: string, viewIds?: string[] | null): Promise<ViewDef[]> {
+  const { results } = await db
+    .prepare('SELECT * FROM views WHERE database_id = ? ORDER BY position ASC, created_at ASC')
     .bind(databaseId)
     .all<SqlRow>();
   const views = (results ?? []).map(viewFromRow);
@@ -193,25 +220,27 @@ export async function loadViews(env: Env, databaseId: string, viewIds?: string[]
 }
 
 export async function loadRecords(
-  env: Env,
+  db: D1Database,
   databaseId: string,
   limit: number,
   offset: number,
 ): Promise<RowRecord[]> {
-  const { results } = await env.DB.prepare(
-    `SELECT * FROM records
-      WHERE database_id = ? AND is_archived = 0
-      ORDER BY position ASC, created_at ASC
-      LIMIT ? OFFSET ?`,
-  )
+  const { results } = await db
+    .prepare(
+      `SELECT * FROM records
+        WHERE database_id = ? AND is_archived = 0
+        ORDER BY position ASC, created_at ASC
+        LIMIT ? OFFSET ?`,
+    )
     .bind(databaseId, limit, offset)
     .all<SqlRow>();
   return (results ?? []).map(recordFromRow);
 }
 
 /** Single row by id (used by the record endpoints to echo the stored state). */
-export async function loadRecord(env: Env, recordId: string): Promise<RowRecord | null> {
-  const row = await env.DB.prepare('SELECT * FROM records WHERE id = ? AND is_archived = 0')
+export async function loadRecord(db: D1Database, recordId: string): Promise<RowRecord | null> {
+  const row = await db
+    .prepare('SELECT * FROM records WHERE id = ? AND is_archived = 0')
     .bind(recordId)
     .first<SqlRow>();
   return row ? recordFromRow(row) : null;
@@ -263,13 +292,16 @@ export async function createDatabase(
   env: Env,
   userId: string,
   options: CreateDatabaseOptions,
-): Promise<{ databaseId: string; properties: Property[]; views: ViewDef[] }> {
+): Promise<{ databaseId: string; properties: Property[]; views: ViewDef[]; db: D1Database }> {
   const databaseId = newId();
   const now = Date.now();
   const defs = materializeTemplateProperties(options.templateId, () => newId());
 
+  // 新表格落在哪个分片：按表格类型（基础 / 专业）挑一个当前最空的（见 shards.ts 的 pickShard）
+  const db = shardDb(env, await pickShard(env, options.kind));
+
   const statements = [
-    env.DB.prepare(
+    db.prepare(
       `INSERT INTO databases (id, owner_id, name, icon, description, kind, is_archived, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`,
     ).bind(databaseId, userId, options.name, options.icon, options.description, options.kind, now, now),
@@ -277,7 +309,7 @@ export async function createDatabase(
 
   defs.forEach((def, index) => {
     statements.push(
-      env.DB.prepare(
+      db.prepare(
         `INSERT INTO properties (id, database_id, name, type, config, position, width, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
@@ -295,7 +327,7 @@ export async function createDatabase(
   });
 
   statements.push(
-    env.DB.prepare(
+    db.prepare(
       `INSERT INTO views (id, database_id, name, type, config, position, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     ).bind(
@@ -310,9 +342,9 @@ export async function createDatabase(
     ),
   );
 
-  await env.DB.batch(statements);
+  await db.batch(statements);
 
-  const properties = await loadProperties(env, databaseId);
+  const properties = await loadProperties(db, databaseId);
 
   // templates that ship a status/select field also get a board view
   const groupProperty = properties.find((p) => p.type === 'status' || p.type === 'select');
@@ -320,10 +352,11 @@ export async function createDatabase(
     const config = defaultViewConfig('board');
     config.groupBy = groupProperty.id;
     const viewId = newId();
-    await env.DB.prepare(
-      `INSERT INTO views (id, database_id, name, type, config, position, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
+    await db
+      .prepare(
+        `INSERT INTO views (id, database_id, name, type, config, position, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
       .bind(viewId, databaseId, '看板视图', 'board', JSON.stringify(config), 2000, now, now)
       .run();
   }
@@ -331,50 +364,57 @@ export async function createDatabase(
   return {
     databaseId,
     properties,
-    views: await loadViews(env, databaseId),
+    views: await loadViews(db, databaseId),
+    db,
   };
 }
 
-export async function countRecords(env: Env, databaseId: string): Promise<number> {
-  const row = await env.DB.prepare(
-    'SELECT COUNT(*) AS total FROM records WHERE database_id = ? AND is_archived = 0',
-  )
+export async function countRecords(db: D1Database, databaseId: string): Promise<number> {
+  const row = await db
+    .prepare('SELECT COUNT(*) AS total FROM records WHERE database_id = ? AND is_archived = 0')
     .bind(databaseId)
     .first<SqlRow>();
   return sqlNumber(row ?? {}, 'total');
 }
 
-export async function loadMembers(env: Env, databaseId: string): Promise<Member[]> {
+/**
+ * 表格的所有者 + 成员（所有者排第一，id 是虚拟的 `owner:<databaseId>`，见成员路由）。
+ *
+ * 成员表在分片里，但成员的邮箱 / 昵称在用户库：跨库没有 JOIN，查完再在 JS 里合并。
+ */
+export async function loadMembers(env: Env, db: D1Database, databaseId: string): Promise<Member[]> {
   const [ownerRow, { results }] = await Promise.all([
-    env.DB.prepare(
-      `SELECT d.owner_id, d.created_at, u.email, u.name
-         FROM databases d JOIN users u ON u.id = d.owner_id
-        WHERE d.id = ?`,
-    )
-      .bind(databaseId)
-      .first<SqlRow>(),
-    env.DB.prepare(
-      `SELECT m.*, u.email, u.name
-       FROM database_members m JOIN users u ON u.id = m.user_id
-      WHERE m.database_id = ?
-      ORDER BY m.created_at ASC`,
-    )
+    db.prepare('SELECT owner_id, created_at FROM databases WHERE id = ?').bind(databaseId).first<SqlRow>(),
+    db
+      .prepare('SELECT * FROM database_members WHERE database_id = ? ORDER BY created_at ASC')
       .bind(databaseId)
       .all<SqlRow>(),
   ]);
 
-  const members = (results ?? []).map(memberFromRow);
+  const memberRows = results ?? [];
+  const contacts = await loadUserContacts(env, [
+    ownerRow ? sqlString(ownerRow, 'owner_id') : null,
+    ...memberRows.map((row) => sqlString(row, 'user_id')),
+  ]);
+
+  const members = memberRows.map((row) => {
+    const member = memberFromRow(row);
+    const contact = contacts.get(member.userId);
+    return contact ? { ...member, email: contact.email || member.email, name: contact.name || member.name } : member;
+  });
   if (!ownerRow) return members;
 
   // The owner is not stored in database_members but is always listed first
   // (their id is a virtual "owner:<databaseId>" handled by the member routes).
+  const ownerId = sqlString(ownerRow, 'owner_id');
+  const owner = contacts.get(ownerId);
   return [
     {
       id: ownerMemberId(databaseId),
       databaseId,
-      userId: sqlString(ownerRow, 'owner_id'),
-      email: sqlString(ownerRow, 'email'),
-      name: sqlString(ownerRow, 'name'),
+      userId: ownerId,
+      email: owner?.email ?? '',
+      name: owner?.name ?? '',
       role: 'owner',
       createdAt: sqlNumber(ownerRow, 'created_at'),
     },
@@ -392,41 +432,56 @@ function isOwnerMemberId(memberId: string): boolean {
   return memberId.startsWith('owner:');
 }
 
-export async function loadShares(env: Env, databaseId: string) {
-  const { results } = await env.DB.prepare(
-    'SELECT * FROM shares WHERE database_id = ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY created_at DESC',
-  )
+export async function loadShares(db: D1Database, databaseId: string) {
+  const { results } = await db
+    .prepare(
+      'SELECT * FROM shares WHERE database_id = ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY created_at DESC',
+    )
     .bind(databaseId, Date.now())
     .all<SqlRow>();
   return (results ?? []).map(shareFromRow);
 }
 
-/** Every view (定向分享) handed to an individual user, newest view first. */
-export async function loadViewShares(env: Env, databaseId: string) {
-  const { results } = await env.DB.prepare(
-    `SELECT vs.*, v.name AS view_name, v.position AS view_position, u.email, u.name
-       FROM view_shares vs
-       JOIN views v ON v.id = vs.view_id
-       JOIN users u ON u.id = vs.user_id
-      WHERE vs.database_id = ?
-      ORDER BY v.position ASC, vs.created_at ASC`,
-  )
+/**
+ * Every view (定向分享) handed to an individual user, newest view first.
+ * 被分享者的邮箱 / 昵称在用户库：分片查出记录后跨库补一次。
+ */
+export async function loadViewShares(env: Env, db: D1Database, databaseId: string) {
+  const { results } = await db
+    .prepare(
+      `SELECT vs.*, v.name AS view_name, v.position AS view_position
+         FROM view_shares vs
+         JOIN views v ON v.id = vs.view_id
+        WHERE vs.database_id = ?
+        ORDER BY v.position ASC, vs.created_at ASC`,
+    )
     .bind(databaseId)
     .all<SqlRow>();
-  return (results ?? []).map(viewShareFromRow);
+  const rows = results ?? [];
+  const contacts = await loadUserContacts(env, rows.map((row) => sqlString(row, 'user_id')));
+  return rows.map((row) => {
+    const share = viewShareFromRow(row);
+    const contact = contacts.get(share.userId);
+    if (!contact) return share;
+    return { ...share, email: contact.email || share.email, name: contact.name || share.name };
+  });
 }
 
+/**
+ * 表格详情（`GET /api/databases/:id` 及各个写接口的响应）。
+ *
+ * `db` 是表格所在的分片（访问检查已经把它钉好，或新建表格时拿到的那个）；
+ * `env` 用来读容量上限与站点设置。
+ */
 export async function buildDatabaseDetail(
   env: Env,
+  db: D1Database,
   databaseId: string,
   access: Pick<DatabaseAccess, 'role' | 'viewIds' | 'userId' | 'limitCellEdits'>,
   url: URL,
 ): Promise<DatabaseDetail> {
-  const row = await env.DB.prepare(
-    `SELECT d.*, u.name AS owner_name
-       FROM databases d JOIN users u ON u.id = d.owner_id
-      WHERE d.id = ? AND d.is_archived = 0`,
-  )
+  const row = await db
+    .prepare('SELECT * FROM databases WHERE id = ? AND is_archived = 0')
     .bind(databaseId)
     .first<SqlRow>();
   if (!row) throw notFound('表格不存在');
@@ -435,20 +490,20 @@ export async function buildDatabaseDetail(
 
   // 增量同步的起点：**先**读版本号、再读数据（写入顺序是「先数据、后日志」，
   // 见 worker/changes.ts 的文件头），客户端拿它当游标就不会漏掉任何改动
-  const rev = await headRev(env);
+  const rev = await headRev(db);
 
   const limit = clampLimit(url);
   const offset = clampOffset(url);
   const scoped = Boolean(access.viewIds?.length);
   const [allProperties, allViews, page, members, shares, viewShares, mentionables] = await Promise.all([
-    loadProperties(env, databaseId),
-    loadViews(env, databaseId),
-    visibleRecords(env, databaseId, access, limit, offset),
-    loadMembers(env, databaseId),
-    loadShares(env, databaseId),
-    loadViewShares(env, databaseId),
+    loadProperties(db, databaseId),
+    loadViews(db, databaseId),
+    visibleRecords(db, databaseId, access, limit, offset),
+    loadMembers(env, db, databaseId),
+    loadShares(db, databaseId),
+    loadViewShares(env, db, databaseId),
     // 备注输入框里的 @ 候选：所有者 + 表格成员 + 定向分享的访客
-    mentionableUsers(env, databaseId),
+    mentionableUsers(env, db, databaseId),
   ]);
 
   const views = scoped ? allViews.filter((view) => access.viewIds?.includes(view.id)) : allViews;
@@ -458,7 +513,7 @@ export async function buildDatabaseDetail(
   // 勾选了「限制编辑」的访问者的单元格锁定状态（其它人恒为空 —— 不受限制）：
   // 计时窗口已过、又仍有内容的格子只读，窗口内的格子（cellEditGrace）还能再改
   const cellLocks = await loadCellEditLocks(
-    env,
+    db,
     databaseId,
     memberCellEditKey(access),
     page.rows.map((item) => item.id),
@@ -466,10 +521,11 @@ export async function buildDatabaseDetail(
   // 当前页记录上的备注（只能新增，不能修改 / 删除）
   const notes = await loadNotes(
     env,
+    db,
     page.rows.map((item) => item.id),
   );
   // 单表容量用量：表格页顶部据此显示「已满，只能查看」的提示条（专业表格不限容量）
-  const capacity = await loadDatabaseCapacity(env, databaseId, kind);
+  const capacity = await loadDatabaseCapacity(env, db, databaseId, kind);
 
   return {
     id: databaseId,
@@ -506,9 +562,10 @@ export async function buildDatabaseDetail(
 }
 
 /** Synthetic access object for the just-created table of `ownerId`. */
-export function ownerAccess(databaseId: string, ownerId: string): DatabaseAccess {
+export function ownerAccess(db: D1Database, databaseId: string, ownerId: string): DatabaseAccess {
   return {
     databaseId,
+    db,
     ownerId,
     userId: ownerId,
     role: 'owner',
@@ -517,10 +574,9 @@ export function ownerAccess(databaseId: string, ownerId: string): DatabaseAccess
   };
 }
 
-export async function touchDatabase(env: Env, databaseId: string): Promise<void> {
-  await env.DB.prepare('UPDATE databases SET updated_at = ? WHERE id = ?')
-    .bind(Date.now(), databaseId)
-    .run();
+/** 记一次「表格被改过」（`updated_at` 是表格列表的排序依据，也和分片同库）。 */
+export async function touchDatabase(db: D1Database, databaseId: string): Promise<void> {
+  await db.prepare('UPDATE databases SET updated_at = ? WHERE id = ?').bind(Date.now(), databaseId).run();
 }
 
 export { TEMPLATES };
@@ -571,15 +627,16 @@ async function createHandler(ctx: RequestContext): Promise<Response> {
   }
 
   const created = await createDatabase(ctx.env, user.id, { name, icon, description, templateId, kind });
-  return json(await buildDatabaseDetail(ctx.env, created.databaseId, ownerAccess(created.databaseId, user.id), ctx.url), {
+  const access = ownerAccess(created.db, created.databaseId, user.id);
+  return json(await buildDatabaseDetail(ctx.env, created.db, created.databaseId, access, ctx.url), {
     status: 201,
   });
 }
 
 async function detailHandler(ctx: RequestContext): Promise<Response> {
   const user = await requireUser(ctx.request, ctx.env);
-  const access = await requireDatabaseAccess(ctx.env, ctx.params.id, user, 'view');
-  return json(await buildDatabaseDetail(ctx.env, ctx.params.id, access, ctx.url));
+  const access = await requireDatabaseAccess(ctx, ctx.params.id, user, 'view');
+  return json(await buildDatabaseDetail(ctx.env, tableDb(ctx), ctx.params.id, access, ctx.url));
 }
 
 /**
@@ -591,10 +648,11 @@ async function detailHandler(ctx: RequestContext): Promise<Response> {
  */
 async function changesHandler(ctx: RequestContext): Promise<Response> {
   const user = await requireUser(ctx.request, ctx.env);
-  const access = await requireDatabaseAccess(ctx.env, ctx.params.id, user, 'view');
+  const access = await requireDatabaseAccess(ctx, ctx.params.id, user, 'view');
   const since = Number(ctx.url.searchParams.get('since') ?? 0);
   const changes = await loadChanges(
     ctx.env,
+    tableDb(ctx),
     ctx.params.id,
     {
       editorKey: memberCellEditKey(access),
@@ -608,13 +666,14 @@ async function changesHandler(ctx: RequestContext): Promise<Response> {
 
 async function recordsPageHandler(ctx: RequestContext): Promise<Response> {
   const user = await requireUser(ctx.request, ctx.env);
-  const access = await requireDatabaseAccess(ctx.env, ctx.params.id, user, 'view');
+  const access = await requireDatabaseAccess(ctx, ctx.params.id, user, 'view');
+  const db = tableDb(ctx);
   const limit = clampLimit(ctx.url);
   const offset = clampOffset(ctx.url);
-  const { rows, total } = await visibleRecords(ctx.env, ctx.params.id, access, limit, offset);
+  const { rows, total } = await visibleRecords(db, ctx.params.id, access, limit, offset);
   // 计时窗口已过且仍有内容的格子 + 还在 10 秒窗口内的格子（不受限制的访问者恒为空）
   const cellLocks = await loadCellEditLocks(
-    ctx.env,
+    db,
     ctx.params.id,
     memberCellEditKey(access),
     rows.map((row) => row.id),
@@ -622,6 +681,7 @@ async function recordsPageHandler(ctx: RequestContext): Promise<Response> {
   // 「加载更多」拿到的这一页记录上的备注（备注只增不改，前端可以放心合并）
   const notes = await loadNotes(
     ctx.env,
+    db,
     rows.map((row) => row.id),
   );
   return json({ rows, total, hasMore: offset + rows.length < total, ...cellLocks, notes });
@@ -629,7 +689,8 @@ async function recordsPageHandler(ctx: RequestContext): Promise<Response> {
 
 async function updateHandler(ctx: RequestContext): Promise<Response> {
   const user = await requireUser(ctx.request, ctx.env);
-  const access = await requireDatabaseAccess(ctx.env, ctx.params.id, user, 'edit');
+  const access = await requireDatabaseAccess(ctx, ctx.params.id, user, 'edit');
+  const db = tableDb(ctx);
   const body = await readJson(ctx.request);
   const fields: string[] = [];
   const values: unknown[] = [];
@@ -647,24 +708,26 @@ async function updateHandler(ctx: RequestContext): Promise<Response> {
     values.push(asString(body.description, '描述', { max: 500 }));
   }
   // body.locked 已被忽略：表级锁定功能已移除（老的客户端传参不再有任何效果）
-  if (!fields.length) return json(await buildDatabaseDetail(ctx.env, ctx.params.id, access, ctx.url));
+  if (!fields.length) return json(await buildDatabaseDetail(ctx.env, db, ctx.params.id, access, ctx.url));
 
   fields.push('updated_at = ?');
   values.push(Date.now(), ctx.params.id);
-  await ctx.env.DB.prepare(`UPDATE databases SET ${fields.join(', ')} WHERE id = ?`)
+  await db.prepare(`UPDATE databases SET ${fields.join(', ')} WHERE id = ?`)
     .bind(...values)
     .run();
   // 表格改名 / 换图标 / 改描述：别人的页面跟着整表刷新一次
-  await logChanges(ctx.env, ctx.params.id, 'schema');
-  return json(await buildDatabaseDetail(ctx.env, ctx.params.id, access, ctx.url));
+  await logChanges(db, ctx.params.id, 'schema');
+  return json(await buildDatabaseDetail(ctx.env, db, ctx.params.id, access, ctx.url));
 }
 
 async function deleteHandler(ctx: RequestContext): Promise<Response> {
   const user = await requireUser(ctx.request, ctx.env);
-  await requireDatabaseAccess(ctx.env, ctx.params.id, user, 'manage');
+  await requireDatabaseAccess(ctx, ctx.params.id, user, 'manage');
+  const db = tableDb(ctx);
 
   // purge the uploaded blobs from R2 before dropping the metadata
-  const { results } = await ctx.env.DB.prepare('SELECT r2_key FROM files WHERE database_id = ?')
+  const { results } = await db
+    .prepare('SELECT r2_key FROM files WHERE database_id = ?')
     .bind(ctx.params.id)
     .all<SqlRow>();
   const keys = (results ?? []).map((row) => sqlString(row, 'r2_key')).filter(Boolean);
@@ -672,24 +735,28 @@ async function deleteHandler(ctx: RequestContext): Promise<Response> {
     await ctx.env.BUCKET.delete(keys.slice(i, i + 100));
   }
 
-  await ctx.env.DB.prepare('DELETE FROM databases WHERE id = ?').bind(ctx.params.id).run();
+  await db.prepare('DELETE FROM databases WHERE id = ?').bind(ctx.params.id).run();
   return json({ ok: true });
 }
 
+/** 成员 id → 它的表格 + 访问权（成员表在分片里，所以先探分片再校验权限）。 */
 async function accessForMember(ctx: RequestContext, memberId: string) {
-  const row = await ctx.env.DB.prepare('SELECT database_id FROM database_members WHERE id = ?')
+  const handle = await requireEntityShard(ctx.env, 'database_members', 'id', memberId, '成员不存在');
+  const row = await handle.db
+    .prepare('SELECT database_id FROM database_members WHERE id = ?')
     .bind(memberId)
     .first<SqlRow>();
   if (!row) throw notFound('成员不存在');
   const databaseId = sqlString(row, 'database_id');
   const user = await requireUser(ctx.request, ctx.env);
-  const access = await requireDatabaseAccess(ctx.env, databaseId, user, 'manage');
+  const access = await requireDatabaseAccess(ctx, databaseId, user, 'manage');
   return { databaseId, access };
 }
 
 async function addMemberHandler(ctx: RequestContext): Promise<Response> {
   const user = await requireUser(ctx.request, ctx.env);
-  const access = await requireDatabaseAccess(ctx.env, ctx.params.id, user, 'manage');
+  const access = await requireDatabaseAccess(ctx, ctx.params.id, user, 'manage');
+  const db = tableDb(ctx);
   const body = await readJson(ctx.request);
   const email = normalizeEmail(body.email);
   const role = asEnum(body.role ?? 'editor', ['editor', 'viewer'] as const, '角色');
@@ -702,7 +769,7 @@ async function addMemberHandler(ctx: RequestContext): Promise<Response> {
   const targetId = sqlString(target, 'id');
   if (targetId === access.ownerId) throw conflict('所有者已经拥有该表格');
 
-  await ctx.env.DB.prepare(
+  await db.prepare(
     `INSERT INTO database_members (id, database_id, user_id, role, created_at)
      VALUES (?, ?, ?, ?, ?)
      ON CONFLICT (database_id, user_id) DO UPDATE SET role = excluded.role`,
@@ -710,39 +777,42 @@ async function addMemberHandler(ctx: RequestContext): Promise<Response> {
     .bind(newId(), ctx.params.id, targetId, role, Date.now())
     .run();
 
-  await touchDatabase(ctx.env, ctx.params.id);
+  await touchDatabase(db, ctx.params.id);
   // 成员列表变了（备注 @ 名单 / 侧边栏也会跟着变）
-  await logChanges(ctx.env, ctx.params.id, 'schema');
-  return json({ members: await loadMembers(ctx.env, ctx.params.id) });
+  await logChanges(db, ctx.params.id, 'schema');
+  return json({ members: await loadMembers(ctx.env, db, ctx.params.id) });
 }
 
 async function updateMemberHandler(ctx: RequestContext): Promise<Response> {
   if (isOwnerMemberId(ctx.params.id)) throw badRequest('不能修改所有者的权限');
   const { databaseId, access } = await accessForMember(ctx, ctx.params.id);
+  const db = tableDb(ctx);
   const body = await readJson(ctx.request);
   const role = asEnum(body.role, ['editor', 'viewer'] as const, '角色');
-  await ctx.env.DB.prepare(
+  await db.prepare(
     `UPDATE database_members SET role = ? WHERE id = ? AND database_id = ?`,
   )
     .bind(role, ctx.params.id, databaseId)
     .run();
-  await logChanges(ctx.env, databaseId, 'schema');
-  return json({ members: await loadMembers(ctx.env, databaseId), role: access.role });
+  await logChanges(db, databaseId, 'schema');
+  return json({ members: await loadMembers(ctx.env, db, databaseId), role: access.role });
 }
 
 async function removeMemberHandler(ctx: RequestContext): Promise<Response> {
   if (isOwnerMemberId(ctx.params.id)) throw badRequest('不能移除所有者');
   const { databaseId } = await accessForMember(ctx, ctx.params.id);
-  await ctx.env.DB.prepare('DELETE FROM database_members WHERE id = ? AND database_id = ?')
+  const db = tableDb(ctx);
+  await db.prepare('DELETE FROM database_members WHERE id = ? AND database_id = ?')
     .bind(ctx.params.id, databaseId)
     .run();
-  await logChanges(ctx.env, databaseId, 'schema');
-  return json({ members: await loadMembers(ctx.env, databaseId) });
+  await logChanges(db, databaseId, 'schema');
+  return json({ members: await loadMembers(ctx.env, db, databaseId) });
 }
 
 async function createShareHandler(ctx: RequestContext): Promise<Response> {
   const user = await requireUser(ctx.request, ctx.env);
-  await requireDatabaseAccess(ctx.env, ctx.params.id, user, 'edit');
+  await requireDatabaseAccess(ctx, ctx.params.id, user, 'edit');
+  const db = tableDb(ctx);
   const body = await readJson(ctx.request);
   const permission = asEnum(body.permission ?? 'view', ['view', 'edit'] as const, '权限');
   // 「限制编辑」：只对可编辑链接有意义（只读链接本来就不能改）
@@ -751,28 +821,31 @@ async function createShareHandler(ctx: RequestContext): Promise<Response> {
   const expiresAt = Number.isFinite(days) && days > 0 ? Date.now() + days * 86_400_000 : null;
 
   const token = randomToken(24);
-  await ctx.env.DB.prepare(
+  await db.prepare(
     `INSERT INTO shares (id, database_id, token, permission, limit_edits, created_by, expires_at, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   )
     .bind(newId(), ctx.params.id, token, permission, limitEdits ? 1 : 0, user.id, expiresAt, Date.now())
     .run();
 
-  await logChanges(ctx.env, ctx.params.id, 'schema');
-  return json({ shares: await loadShares(ctx.env, ctx.params.id) }, { status: 201 });
+  await logChanges(db, ctx.params.id, 'schema');
+  return json({ shares: await loadShares(db, ctx.params.id) }, { status: 201 });
 }
 
 async function deleteShareHandler(ctx: RequestContext): Promise<Response> {
   const user = await requireUser(ctx.request, ctx.env);
-  const row = await ctx.env.DB.prepare('SELECT database_id FROM shares WHERE id = ?')
+  const handle = await requireEntityShard(ctx.env, 'shares', 'id', ctx.params.id, '分享链接不存在');
+  const row = await handle.db
+    .prepare('SELECT database_id FROM shares WHERE id = ?')
     .bind(ctx.params.id)
     .first<SqlRow>();
   if (!row) throw notFound('分享链接不存在');
   const databaseId = sqlString(row, 'database_id');
-  await requireDatabaseAccess(ctx.env, databaseId, user, 'edit');
-  await ctx.env.DB.prepare('DELETE FROM shares WHERE id = ?').bind(ctx.params.id).run();
-  await logChanges(ctx.env, databaseId, 'schema');
-  return json({ shares: await loadShares(ctx.env, databaseId) });
+  await requireDatabaseAccess(ctx, databaseId, user, 'edit');
+  const db = tableDb(ctx);
+  await db.prepare('DELETE FROM shares WHERE id = ?').bind(ctx.params.id).run();
+  await logChanges(db, databaseId, 'schema');
+  return json({ shares: await loadShares(db, databaseId) });
 }
 
 /**
@@ -785,7 +858,8 @@ async function deleteShareHandler(ctx: RequestContext): Promise<Response> {
  */
 async function createViewShareHandler(ctx: RequestContext): Promise<Response> {
   const user = await requireUser(ctx.request, ctx.env);
-  const access = await requireDatabaseAccess(ctx.env, ctx.params.id, user, 'manage');
+  const access = await requireDatabaseAccess(ctx, ctx.params.id, user, 'manage');
+  const db = tableDb(ctx);
   const body = await readJson(ctx.request);
   const viewId = asString(body.viewId, '视图', { required: true, max: 64 });
   const role = asEnum(body.role ?? 'viewer', ['viewer', 'editor'] as const, '角色');
@@ -794,7 +868,7 @@ async function createViewShareHandler(ctx: RequestContext): Promise<Response> {
   const email = normalizeEmail(body.email);
   const inviteRequested = asFlag(body.invite);
 
-  const view = await ctx.env.DB.prepare('SELECT id FROM views WHERE id = ? AND database_id = ?')
+  const view = await db.prepare('SELECT id FROM views WHERE id = ? AND database_id = ?')
     .bind(viewId, ctx.params.id)
     .first<SqlRow>();
   if (!view) throw notFound('视图不存在');
@@ -805,7 +879,7 @@ async function createViewShareHandler(ctx: RequestContext): Promise<Response> {
     if (!inviteRequested) {
       throw new HttpError(404, 'email_not_registered', '该邮箱还没有注册账号，可以邀请对方注册后再分享');
     }
-    const invite = await issueViewInvite(ctx.env, {
+    const invite = await issueViewInvite(db, {
       email,
       databaseId: ctx.params.id,
       viewId,
@@ -814,9 +888,9 @@ async function createViewShareHandler(ctx: RequestContext): Promise<Response> {
       invitedBy: user.id,
     });
     // 发信失败会删掉这条邀请并抛 502；成功 / 回显才返回
-    const deliveredInvite = await deliverViewInvite(ctx.env, invite, ctx.url.origin);
+    const deliveredInvite = await deliverViewInvite(ctx.env, db, invite, ctx.url.origin);
     return json(
-      { viewShares: await loadViewShares(ctx.env, ctx.params.id), invite: deliveredInvite },
+      { viewShares: await loadViewShares(ctx.env, db, ctx.params.id), invite: deliveredInvite },
       { status: 201 },
     );
   }
@@ -824,7 +898,7 @@ async function createViewShareHandler(ctx: RequestContext): Promise<Response> {
   const targetId = sqlString(target, 'id');
   if (targetId === access.ownerId) throw conflict('所有者已经拥有该表格');
 
-  await ctx.env.DB.prepare(
+  await db.prepare(
     `INSERT INTO view_shares (id, database_id, view_id, user_id, role, limit_edits, created_by, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT (view_id, user_id) DO UPDATE SET role = excluded.role, limit_edits = excluded.limit_edits`,
@@ -841,22 +915,25 @@ async function createViewShareHandler(ctx: RequestContext): Promise<Response> {
     )
     .run();
 
-  await touchDatabase(ctx.env, ctx.params.id);
-  await logChanges(ctx.env, ctx.params.id, 'schema');
-  return json({ viewShares: await loadViewShares(ctx.env, ctx.params.id) }, { status: 201 });
+  await touchDatabase(db, ctx.params.id);
+  await logChanges(db, ctx.params.id, 'schema');
+  return json({ viewShares: await loadViewShares(ctx.env, db, ctx.params.id) }, { status: 201 });
 }
 
 async function deleteViewShareHandler(ctx: RequestContext): Promise<Response> {
   const user = await requireUser(ctx.request, ctx.env);
-  const row = await ctx.env.DB.prepare('SELECT database_id FROM view_shares WHERE id = ?')
+  const handle = await requireEntityShard(ctx.env, 'view_shares', 'id', ctx.params.id, '视图分享不存在');
+  const row = await handle.db
+    .prepare('SELECT database_id FROM view_shares WHERE id = ?')
     .bind(ctx.params.id)
     .first<SqlRow>();
   if (!row) throw notFound('视图分享不存在');
   const databaseId = sqlString(row, 'database_id');
-  await requireDatabaseAccess(ctx.env, databaseId, user, 'manage');
-  await ctx.env.DB.prepare('DELETE FROM view_shares WHERE id = ?').bind(ctx.params.id).run();
-  await logChanges(ctx.env, databaseId, 'schema');
-  return json({ viewShares: await loadViewShares(ctx.env, databaseId) });
+  await requireDatabaseAccess(ctx, databaseId, user, 'manage');
+  const db = tableDb(ctx);
+  await db.prepare('DELETE FROM view_shares WHERE id = ?').bind(ctx.params.id).run();
+  await logChanges(db, databaseId, 'schema');
+  return json({ viewShares: await loadViewShares(ctx.env, db, databaseId) });
 }
 
 export const databaseRoutes: Route[] = [

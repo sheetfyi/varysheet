@@ -19,6 +19,7 @@ import {
   type SqlRow,
 } from '../http';
 import type { Env, RequestContext, Route } from '../types';
+import { requireEntityShard } from '../shards';
 import { touchDatabase } from './databases';
 
 /** Keep the object key readable but free of characters that upset URLs. */
@@ -62,6 +63,8 @@ async function uploadHandler(ctx: RequestContext): Promise<Response> {
   // either an authenticated member with edit rights, or a share link with edit permission
   const token = typeof form.get('token') === 'string' ? String(form.get('token')) : '';
   let databaseId = typeof form.get('databaseId') === 'string' ? String(form.get('databaseId')) : '';
+  // 附件元数据（`files`）跟表格一起落在分片里：先定下分片库，后面所有读写都走它
+  let db: D1Database | null = null;
   // 单元格级「限制编辑」的归属键；表格所有者 / 表格成员 / 没勾选「限制编辑」的
   // 分享都是 null（不受限制）
   let editorKey: string | null = null;
@@ -70,39 +73,43 @@ async function uploadHandler(ctx: RequestContext): Promise<Response> {
     if (!share) throw notFound('分享链接无效或已过期');
     if (share.permission !== 'edit') throw forbidden('该分享链接不允许上传文件');
     databaseId = share.databaseId;
+    db = share.db;
     editorKey = shareCellEditKey(share);
   } else if (databaseId) {
     if (!user) throw unauthorized();
-    const access = await requireDatabaseAccess(ctx.env, databaseId, user, 'edit');
+    const access = await requireDatabaseAccess(ctx, databaseId, user, 'edit');
+    db = access.db;
     editorKey = memberCellEditKey(access);
   } else if (!user) {
     throw unauthorized();
   }
+  // 分片存储之后没有「无主附件」：附件必须挂在某张表格上
+  if (!db) throw badRequest('缺少 databaseId：附件必须挂在某张表格上');
 
   const recordId = typeof form.get('recordId') === 'string' ? String(form.get('recordId')) : null;
   const propertyId = typeof form.get('propertyId') === 'string' ? String(form.get('propertyId')) : null;
 
   // 字段级锁定：锁定字段不接受新的上传
-  if (databaseId && propertyId) {
-    const property = await ctx.env.DB.prepare('SELECT name, is_locked FROM properties WHERE id = ? AND database_id = ?')
+  if (propertyId) {
+    const property = await db.prepare('SELECT name, is_locked FROM properties WHERE id = ? AND database_id = ?')
       .bind(propertyId, databaseId)
       .first<SqlRow>();
     if (property && sqlNumber(property, 'is_locked') === 1) {
       throw forbidden(`字段「${sqlString(property, 'name')}」已锁定，无法上传文件`);
     }
     // 单元格级「限制编辑」：已经锁上的格子（计时窗口已过、仍有内容）不再接受新的上传
-    if (recordId && property && (await isCellLocked(ctx.env, databaseId, editorKey, recordId, propertyId))) {
+    if (recordId && property && (await isCellLocked(db, databaseId, editorKey, recordId, propertyId))) {
       throw forbidden(cellLockHint(sqlString(property, 'name')));
     }
   }
 
   // 附件容量按「表」统计：到上限后不再接受新的上传（已有文件照常下载 / 删除）
-  if (databaseId) await assertDatabaseCanGrow(ctx.env, databaseId, { bytes: file.size });
+  await assertDatabaseCanGrow(ctx.env, db, databaseId, { bytes: file.size });
 
   const fileId = newId();
   const name = safeFileName(asString(file.name, '文件名', { max: 200 }) || 'file');
   const mime = file.type || 'application/octet-stream';
-  const key = `${databaseId || 'misc'}/${fileId}/${name}`;
+  const key = `${databaseId}/${fileId}/${name}`;
 
   await ctx.env.BUCKET.put(key, file.stream(), {
     httpMetadata: { contentType: mime },
@@ -110,13 +117,14 @@ async function uploadHandler(ctx: RequestContext): Promise<Response> {
   });
 
   const now = Date.now();
-  await ctx.env.DB.prepare(
-    `INSERT INTO files (id, database_id, record_id, property_id, r2_key, name, size, mime, uploaded_by, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  )
+  await db
+    .prepare(
+      `INSERT INTO files (id, database_id, record_id, property_id, r2_key, name, size, mime, uploaded_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
     .bind(
       fileId,
-      databaseId || null,
+      databaseId,
       recordId,
       propertyId,
       key,
@@ -128,15 +136,18 @@ async function uploadHandler(ctx: RequestContext): Promise<Response> {
     )
     .run();
 
-  if (databaseId) await touchDatabase(ctx.env, databaseId);
+  await touchDatabase(db, databaseId);
   // 附件挂在某条记录上时也算这行「有更新」：别人的表格页会立刻同步一次这行
-  if (databaseId && recordId) await logChanges(ctx.env, databaseId, 'row', [recordId]);
+  if (recordId) await logChanges(db, databaseId, 'row', [recordId]);
 
   const value: FileValue = { id: fileId, name, size: file.size, mime };
   return json({ file: value, url: `/api/files/${fileId}` }, { status: 201 });
 }
 
-/** Owners / members can always read; share visitors need a valid `?token=`. */
+/**
+ * Owners / members can always read; share visitors need a valid `?token=`.
+ * 附件行在分片里，所以调用方先把「这个文件在哪个分片」探出来。
+ */
 async function authorizeDownload(
   ctx: RequestContext,
   row: SqlRow,
@@ -149,7 +160,7 @@ async function authorizeDownload(
   }
   const user = await requireUser(ctx.request, ctx.env);
   if (databaseId) {
-    await requireDatabaseAccess(ctx.env, databaseId, user, 'view');
+    await requireDatabaseAccess(ctx, databaseId, user, 'view');
   } else if (sqlString(row, 'uploaded_by') !== user.id) {
     throw forbidden('没有权限访问该文件');
   }
@@ -157,7 +168,10 @@ async function authorizeDownload(
 }
 
 async function downloadHandler(ctx: RequestContext): Promise<Response> {
-  const row = await ctx.env.DB.prepare('SELECT * FROM files WHERE id = ?')
+  // `files` 跟着表格走：文件 id 不是表格 id，只能先逐分片探出归属
+  const { db } = await requireEntityShard(ctx.env, 'files', 'id', ctx.params.id, '文件不存在');
+  const row = await db
+    .prepare('SELECT * FROM files WHERE id = ?')
     .bind(ctx.params.id)
     .first<SqlRow>();
   if (!row) throw notFound('文件不存在');
@@ -183,18 +197,20 @@ async function downloadHandler(ctx: RequestContext): Promise<Response> {
 
 async function deleteHandler(ctx: RequestContext): Promise<Response> {
   const user = await requireUser(ctx.request, ctx.env);
-  const row = await ctx.env.DB.prepare('SELECT * FROM files WHERE id = ?')
+  const { db } = await requireEntityShard(ctx.env, 'files', 'id', ctx.params.id, '文件不存在');
+  const row = await db
+    .prepare('SELECT * FROM files WHERE id = ?')
     .bind(ctx.params.id)
     .first<SqlRow>();
   if (!row) throw notFound('文件不存在');
 
   const databaseId = sqlString(row, 'database_id');
   if (databaseId) {
-    const access = await requireDatabaseAccess(ctx.env, databaseId, user, 'edit');
+    const access = await requireDatabaseAccess(ctx, databaseId, user, 'edit');
     // 字段级锁定：锁定字段不接受附件删除（记录里仍然引用该文件）
     const propertyId = sqlString(row, 'property_id');
     if (propertyId) {
-      const property = await ctx.env.DB.prepare('SELECT name, is_locked FROM properties WHERE id = ? AND database_id = ?')
+      const property = await db.prepare('SELECT name, is_locked FROM properties WHERE id = ? AND database_id = ?')
         .bind(propertyId, databaseId)
         .first<SqlRow>();
       if (property && sqlNumber(property, 'is_locked') === 1) {
@@ -205,7 +221,7 @@ async function deleteHandler(ctx: RequestContext): Promise<Response> {
       if (
         recordId
         && property
-        && (await isCellLocked(ctx.env, databaseId, memberCellEditKey(access), recordId, propertyId))
+        && (await isCellLocked(db, databaseId, memberCellEditKey(access), recordId, propertyId))
       ) {
         throw forbidden(cellLockHint(sqlString(property, 'name')));
       }
@@ -215,8 +231,8 @@ async function deleteHandler(ctx: RequestContext): Promise<Response> {
   }
 
   await ctx.env.BUCKET.delete(sqlString(row, 'r2_key'));
-  await ctx.env.DB.prepare('DELETE FROM files WHERE id = ?').bind(ctx.params.id).run();
-  if (databaseId) await touchDatabase(ctx.env, databaseId);
+  await db.prepare('DELETE FROM files WHERE id = ?').bind(ctx.params.id).run();
+  if (databaseId) await touchDatabase(db, databaseId);
   return json({ ok: true });
 }
 

@@ -18,6 +18,7 @@ import { propertyRoutes } from './routes/properties';
 import { publicRoutes } from './routes/public';
 import { quotaRoutes } from './routes/quota';
 import { recordRoutes } from './routes/records';
+import { shardRoutes } from './routes/shards';
 import { viewRoutes } from './routes/views';
 import { purgeExpiredBasicData } from './retention';
 import { DEFAULT_SITE_NAME } from './settings';
@@ -28,6 +29,7 @@ const API_ROUTES: Route[] = [
   ...brandingRoutes,
   ...inviteRoutes,
   ...adminRoutes,
+  ...shardRoutes,
   ...quotaRoutes,
   ...databaseRoutes,
   ...propertyRoutes,

@@ -17,6 +17,7 @@
  */
 import { logChanges } from './changes';
 import { sqlNumber, sqlString, type SqlRow } from './http';
+import { forEachShardSafe } from './shards';
 import { DAY_MS, tableKindMeta } from '../shared/tableKind';
 import type { Env } from './types';
 
@@ -51,6 +52,9 @@ export interface RetentionResult {
 /**
  * 清理所有**基础表格**里超过保留期的记录与附件（专业表格不参与）。
  * 定时任务与管理员手动接口都走它；关掉清理（保留天数为 0）时直接返回空结果。
+ *
+ * 表格数据在分片里：逐个分片把「这一片上的基础表格」列出来再清理（`databases.kind`
+ * 仍然是最权威的口径）。某个分片暂时不可用不影响其它分片，失败会记进日志。
  */
 export async function purgeExpiredBasicData(
   env: Env,
@@ -63,30 +67,38 @@ export async function purgeExpiredBasicData(
   const cutoff = now - days * DAY_MS;
   result.cutoff = cutoff;
 
-  const { results } = await env.DB.prepare('SELECT id FROM databases WHERE kind = ?')
-    .bind(tableKindMeta('basic').kind)
-    .all<SqlRow>();
+  const scans = await forEachShardSafe(env, async (_shard, db) => {
+    const { results } = await db
+      .prepare('SELECT id FROM databases WHERE kind = ?')
+      .bind(tableKindMeta('basic').kind)
+      .all<SqlRow>();
 
-  for (const row of results ?? []) {
-    const purged = await purgeDatabase(env, sqlString(row, 'id'), cutoff, result);
-    if (purged) result.databases += 1;
-  }
+    let purged = 0;
+    for (const row of results ?? []) {
+      if (await purgeDatabase(env, db, sqlString(row, 'id'), cutoff, result)) purged += 1;
+    }
+    return purged;
+  });
+
+  for (const scan of scans) result.databases += scan.value ?? 0;
   return result;
 }
 
 /**
  * 清一张基础表格里的过期数据；真的清掉了东西才返回 true
  * （顺便往增量日志里记一条 `schema`，别人开着的表格页会整表重载）。
+ *
+ * `db` 是这张表所在的分片：记录 / 附件 / 改动日志都在里面。
  */
 async function purgeDatabase(
   env: Env,
+  db: D1Database,
   databaseId: string,
   cutoff: number,
   result: RetentionResult,
 ): Promise<boolean> {
-  const { results: fileRows } = await env.DB.prepare(
-    'SELECT id, r2_key, size FROM files WHERE database_id = ? AND created_at < ?',
-  )
+  const { results: fileRows } = await db
+    .prepare('SELECT id, r2_key, size FROM files WHERE database_id = ? AND created_at < ?')
     .bind(databaseId, cutoff)
     .all<SqlRow>();
   const files = fileRows ?? [];
@@ -97,7 +109,8 @@ async function purgeDatabase(
       const keys = files.slice(index, index + R2_DELETE_BATCH).map((file) => sqlString(file, 'r2_key'));
       await env.BUCKET.delete(keys).catch(() => undefined);
     }
-    await env.DB.prepare('DELETE FROM files WHERE database_id = ? AND created_at < ?')
+    await db
+      .prepare('DELETE FROM files WHERE database_id = ? AND created_at < ?')
       .bind(databaseId, cutoff)
       .run();
     result.files += files.length;
@@ -105,14 +118,15 @@ async function purgeDatabase(
   }
 
   // 记录删掉后，它上面的备注 / 格子编辑记录由外键级联清理
-  const deleted = await env.DB.prepare('DELETE FROM records WHERE database_id = ? AND created_at < ?')
+  const deleted = await db
+    .prepare('DELETE FROM records WHERE database_id = ? AND created_at < ?')
     .bind(databaseId, cutoff)
     .run();
   const records = Number(deleted.meta?.changes ?? 0);
   result.records += records;
 
   if (files.length || records > 0) {
-    await logChanges(env, databaseId, 'schema');
+    await logChanges(db, databaseId, 'schema');
     return true;
   }
   return false;

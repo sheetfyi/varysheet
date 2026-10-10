@@ -603,6 +603,84 @@ export interface AdminSettingsResponse {
   branding: BrandingResponse;
 }
 
+/* --------------------------------------------------------- 后台「存储分片」 */
+
+/** 分片库里某一片的用量明细（读不到时各项为 null，页面显示「用量未知」） */
+export interface AdminShardCounts {
+  /** 这一片上的表格数 */
+  databases: number | null;
+  /** 有效记录数（同 `records.is_archived = 0`） */
+  records: number | null;
+  /** 附件数 */
+  files: number | null;
+  /** 附件合计字节数 */
+  fileBytes: number | null;
+}
+
+/** 一个分片库的运行时状态：`GET /api/admin/shards` */
+export interface AdminShard extends AdminShardCounts {
+  id: string;
+  name: string;
+  kind: TableKind;
+  /** Cloudflare D1 的 database_id（绑定兜底分片没有这个值） */
+  databaseId: string;
+  /** 走 Worker 绑定（快）还是 Cloudflare HTTP 接口（慢） */
+  transport: 'binding' | 'http';
+  binding: string | null;
+  note: string;
+  isActive: boolean;
+  /** 有 database_id 才能在 Cloudflare 上管（读用量 / 建表 / 后续维护） */
+  manageable: boolean;
+  /** Cloudflare 报的库大小（字节）；没读到为 null */
+  usedBytes: number | null;
+  /** 单个 D1 库的硬上限（10GB） */
+  limitBytes: number;
+  /** 已用比例（0~1）；读不到用量时按 0 算 */
+  ratio: number;
+  /** 超过告警比例（默认 85%）：该准备新建分片了 */
+  nearLimit: boolean;
+  checkedAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** 分片总览（后台页面顶部的小结） */
+export interface AdminShardSummary extends AdminShardCounts {
+  shards: number;
+  activeShards: number;
+  /** 已经接近上限、需要准备新库的分片数 */
+  nearLimit: number;
+  /** 所有分片已用空间之和（只统计读得到用量的） */
+  usedBytes: number;
+  /** 单个分片上限（10GB），和表格页的容量条同一个口径 */
+  limitBytes: number;
+  /** 有多少个分片读不到用量（Cloudflare 没配 / 库被删） */
+  unknownUsage: number;
+  /** Cloudflare D1 的凭据是否配好（没配就没法新建 / 挂载库、也刷不了用量） */
+  d1ApiConfigured: boolean;
+}
+
+/** `GET /api/admin/shards` 以及各个写接口的响应（写完顺手把最新总览回给前端） */
+export interface AdminShardsResponse {
+  shards: AdminShard[];
+  summary: AdminShardSummary;
+}
+
+/** Cloudflare 账号下的一个 D1 库（「挂载现成的库」时给管理员挑） */
+export interface AdminAccountDatabase {
+  uuid: string;
+  name: string;
+  fileSize: number | null;
+  numTables: number | null;
+  createdAt: string | null;
+  /** 已经登记在 `database_shards` 里了 */
+  mounted: boolean;
+}
+
+export interface AdminAccountDatabasesResponse {
+  databases: AdminAccountDatabase[];
+}
+
 /** 管理员重置密码的响应：`password` 是新的（临时）密码，直接展示给管理员。 */
 export interface AdminPasswordResetResponse {
   ok: true;

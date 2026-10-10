@@ -51,11 +51,14 @@ src/
     email.ts   Resend 发信（确认码 / 重置密码 / 视图邀请；没配 RESEND_API_KEY 或发信失败都只记日志，不阻断流程）
     emailCodes.ts 注册邮箱确认码：发码（15 分钟有效、60 秒重发节流）、校验、清过期
     invites.ts 视图分享邀请：签发 / 投递（邮件里 `/invite/<token>`）/ 接受后写入 view_shares
-    access.ts  表格访问级别判定（view/edit/manage）
-    changes.ts 多人协作的增量同步：改动日志（database_changes）+「自某个版本号起的改动」查询
+    access.ts  表格访问级别判定（view/edit/manage）；访问检查同时把表格的分片库钉在 `ctx.db`
+    shards.ts  分片路由：表格 id → 分片库（逐分片探测 + isolate 缓存）、跨分片扫描、分片注册表管理
+    shardSchema.ts 分片库的建表脚本（唯一一份 DDL，后台新建分片与 migrations/tables 共用）
+    d1Remote.ts Cloudflare D1 HTTP 接口客户端（管理员动态新建的备用分片没有 Worker 绑定，只能走它）
+    changes.ts 多人协作的增量同步：改动日志（database_changes，跟着表格走）+「自某个版本号起的改动」查询
     retention.ts 基础表格的保留期清理：超过一年（BASIC_TABLE_RETENTION_DAYS）的记录与附件（含 R2 对象）
     mappers.ts D1 行 -> API 类型
-    routes/    auth / invites / admin / quota / databases / properties / records / views / public / files / notes / branding
+    routes/    auth / invites / admin / shards / quota / databases / properties / records / views / public / files / notes / branding
   client/     React SPA
     App.tsx            会话 + 表格列表 + `/share/:token`、`/invite/:token` 路由
     api.ts             fetch 封装（cookie + `Authorization: Bearer` 兜底、ApiError、typed 响应）
@@ -63,7 +66,7 @@ src/
     components/        AuthPage Sidebar DatabasePage PublicPage TableGrid CardViews
                        Cell RecordDialog PropertyDialog ViewBar SharePanel Modal Popover
                        InboxButton UserChip FilterPanel ChangePasswordDialog
-                       InvitePage AdminPanel SiteSettingsCard SiteMark ResetResultCard EditUserDialog
+                       InvitePage AdminPanel SiteSettingsCard ShardsCard SiteMark ResetResultCard EditUserDialog
     lib/viewEngine.ts  前端筛选/排序/分组计算
     lib/time.ts        相对时间 / 精确时间的格式化
     lib/cellEditLocks.ts  单元格「限制编辑」的 10 秒计时窗口（判定 / 倒计时 / 到点自动只读）
@@ -71,18 +74,20 @@ src/
 scripts/
   check-routes.mjs  路由静态检查（重复/处理器缺失/公开端点）
   smoke-test.mjs    端到端冒烟测试（失败时退出码 1）
+  sync-shard-schema.mjs  从 src/worker/shardSchema.ts 生成 migrations/tables/0001_init.sql 与用户库的拆分迁移
+  migrate-split-data.mjs 把老部署里用户库中的表格数据搬进分片库并核对行数（`npm run db:split`）
 tools/
   mobile-check/nocookie-login.mjs  本地诊断：用「丢掉 Set-Cookie」的反向代理模拟手机浏览器，验证登录后不会被打回登录页
   online-smoke-proxy.mjs           国内网络下让 Node 的 fetch 走系统代理，跑线上冒烟测试
+docs/
+  storage.md  存储结构：用户库 / 分片库 / R2 的分工、分片路由、跨库没有外键、数据搬迁与后台分片管理
 migrations/
-  0001_init.sql     D1 初始化迁移
-  ...               0002-0005：视图定向分享 / 字段锁定 / 分享限制编辑等增量迁移
-  0006_notes.sql    记录备注（notes）+ @提醒私信（note_mentions）
-  0007_database_changes.sql  多人协作增量同步的改动日志（database_changes，rev 全局自增）
-  0008_admin_and_email_codes.sql  超级管理员标记（users.is_admin）+ 注册邮箱确认码（email_codes）
-  0009_view_invites.sql  视图分享邀请（view_invites）
-  0010_site_settings.sql 站点设置键值表（settings：站点名称 / 图标 / 管理员邮箱 / Resend 密钥与发件人）
-  0011_table_kinds_and_purchases.sql 表格类型（databases.kind：基础 / 专业）+ 名额购买流水（table_purchases）
+  control/    用户库（cloudnotion-db）的迁移：账号 / 会话 / 设置 / 名额 / @提醒 / 分片注册表
+    0001_init.sql … 0011_table_kinds_and_purchases.sql  历史迁移（原样保留）
+    0012_split_table_storage.sql  表格数据搬去分片库：DROP 用户库里的旧表 + 建分片注册表 database_shards
+    0013_note_mentions_rebuild.sql  重建 note_mentions，去掉它指向 notes（已在分片库）的旧外键
+  tables/     每个分片库（cloudnotion-tables-basic / -pro）的迁移
+    0001_init.sql  分片库的全部建表语句（由 scripts/sync-shard-schema.mjs 生成）
 ```
 
 ## 快速开始
@@ -103,7 +108,9 @@ npm run dev
 
 - `npm run dev:web`：只跑 Vite 前端（`/api` 需代理到 Worker，见 `vite.config.ts`）
 - `npm run typecheck`：`tsconfig.client.json` + `tsconfig.worker.json` 全量类型检查
-- `npm run check:routes`：路由自检（当前 49 条路由）
+- `npm run check:routes`：路由自检（含 `/api/admin/shards*`）
+- `npm run schema:check`：分片建表脚本（`src/worker/shardSchema.ts`）与迁移文件是否同步
+- `npm run db:split`：**老部署升级时**把用户库里的表格数据搬进分片库并核对（等价于 `node scripts/migrate-split-data.mjs`；先加 `--dry-run` 看数量，线上加 `--remote`）
 - `npm run test:e2e`：对运行中的 Worker 跑端到端冒烟测试
 - `.dev.vars`：本地机密（`RESEND_API_KEY`、`ADMIN_EMAIL` / `ADMIN_PASSWORD`），已在 `.gitignore` 里；
   模板见 `.dev.vars.example`，线上用 `npx wrangler secret put`（详见 [DEPLOY.md 6.6](./DEPLOY.md)）
@@ -118,25 +125,35 @@ BASE_URL=https://cloudnotion.example.workers.dev node scripts/smoke-test.mjs
 
 ## 数据模型
 
-- `users` / `sessions`：账号与会话（`sessions.token_hash` 唯一）；`users.is_admin = 1` = 超级管理员（由 `ADMIN_EMAIL` 引导写入），`sessions.last_seen_at` 供用户管理列表显示「最近活跃」
-- `email_codes`：注册邮箱确认码（`email` + 6 位 `code_hash`、`expires_at`、`consumed_at`、`attempts`、`sent_at` = 60 秒重发节流）。
+存储拆成「用户库 + 表格分片库」（详见 [docs/storage.md](./docs/storage.md)）：
+
+- **用户库**（绑定 `DB`）：账号 / 会话 / 注册确认码 / 站点设置 / 名额购买流水 / @提醒（`note_mentions`）/ 分片注册表（`database_shards`）；
+- **表格分片库**（绑定 `DB_TABLES_BASIC` / `DB_TABLES_PRO`，后台可再挂载备用分片）：表格 / 成员 / 字段 / 记录 / 视图 / 分享 / 定向分享 / 单元格记账 / 备注 / 改动日志 / 附件元数据 / 邀请；
+- **R2**（绑定 `BUCKET`）：附件本体。
+
+每张表所在的库在下面标出来了（跨库没有外键，需要拼接的地方都是「两次查询 + JS 合并」）。
+
+- `users` / `sessions`（用户库）：账号与会话（`sessions.token_hash` 唯一）；`users.is_admin = 1` = 超级管理员（由 `ADMIN_EMAIL` 引导写入），`sessions.last_seen_at` 供用户管理列表显示「最近活跃」
+- `email_codes`（用户库）：注册邮箱确认码（`email` + 6 位 `code_hash`、`expires_at`、`consumed_at`、`attempts`、`sent_at` = 60 秒重发节流）。
   只存哈希：确认过的码不能重放；验证通过前**不会**写 `users`，所以未确认的邮箱不占号
-- `invites`：视图分享邀请（分享给**还没注册**的邮箱时写入：`token` 唯一、`email`、`database_id` + `view_id` + `role`/`limit_edits`、`expires_at`（默认 7 天）、`accepted_at`）。
+- `database_shards`（用户库）：分片注册表 —— 有哪些分片库、各自服务哪一类表格、用了多少空间（见 `src/worker/shards.ts`）
+- `invites`（分片库）：视图分享邀请（分享给**还没注册**的邮箱时写入：`token` 唯一、`email`、`database_id` + `view_id` + `role`/`limit_edits`、`expires_at`（默认 7 天）、`accepted_at`）。
   邮件里的链接 `/invite/<token>` 被打开后填昵称 + 密码即完成注册，并把这条视图分享写进 `view_shares`；没接受的邀请不占邮箱、也不出现在用户列表里
-- `databases`：一张表格，`kind` = `basic`（基础表格）/ `pro`（专业表格）—— 容量、保留期、列数与视图数上限都按它取；`database_members`：受邀协作者（`role` = editor/viewer）
-- `table_purchases`：表格名额购买流水（`user_id` + `kind` + `count`、`channel` 先记 `self-serve`），`/api/quota` 里「已购买」就是同类型 `count` 之和
-- `properties`：字段定义（`type` + `config` JSON + `position` REAL 排序 + `is_locked` 字段级锁定）
-- `records`：一行记录，`"values"` 字段存 `{ 字段id: 值 }` JSON 文本，`position` REAL 排序
+- `databases`（分片库）：一张表格，`kind` = `basic`（基础表格）/ `pro`（专业表格）—— 容量、保留期、列数与视图数上限都按它取；`database_members`：受邀协作者（`role` = editor/viewer）
+- `table_purchases`（用户库）：表格名额购买流水（`user_id` + `kind` + `count`、`channel` 先记 `self-serve`），`/api/quota` 里「已购买」就是同类型 `count` 之和
+- `properties`（分片库）：字段定义（`type` + `config` JSON + `position` REAL 排序 + `is_locked` 字段级锁定）
+- `records`（分片库）：一行记录，`"values"` 字段存 `{ 字段id: 值 }` JSON 文本，`position` REAL 排序
   > 注意：`values` 是 SQLite 保留字，SQL 里必须写成 `"values"`（迁移与 `routes/*.ts` 均已加引号）
-- `views`：视图（`type` + `config` JSON：filters/sorts/groupBy/visibleProperties/rowHeight/cardSize…）
-- `shares`：公开分享链接（`token` 唯一、`permission`、`expires_at`）
-- `files`：R2 对象元数据（`r2_key`、名称、大小、MIME）
-- `cell_edits`：单元格级「限制编辑」的记账（`editor_key` = 公开链接 / 视图定向分享访问者的身份，`record_id` + `property_id` 定位格子，`created_at` = **最近一次**保存成功的时刻）。
+- `views`（分片库）：视图（`type` + `config` JSON：filters/sorts/groupBy/visibleProperties/rowHeight/cardSize…）
+- `shares` / `view_shares`（分片库）：公开分享链接（`token` 唯一、`permission`、`expires_at`）与视图定向分享
+- `files`（分片库）：R2 对象元数据（`r2_key`、名称、大小、MIME）；附件本体在 R2
+- `cell_edits`（分片库）：单元格级「限制编辑」的记账（`editor_key` = 公开链接 / 视图定向分享访问者的身份，`record_id` + `property_id` 定位格子，`created_at` = **最近一次**保存成功的时刻）。
   每保存一次就刷新 `created_at`（UPSERT），所以窗口始终从最近一次保存重新起算；把内容清空则直接删掉这条记账（= 没输入过，之后可以重新输入）。
   `created_at + 10 秒`（`CELL_EDIT_GRACE_MS`）之后只要这一格仍有内容就只读，接口据此下发 `lockedCells` / `cellEditGrace`
-- `notes`：记录备注（评论），**只增不改**（没有 update / delete 语句与接口）
-- `note_mentions`：备注里 @ 到的人 → 收件箱私信；`read_at` 为 NULL 表示未读（就是红点里的数字）
-- `database_changes`：多人协作的**改动日志**（`rev` 全局自增主键、`kind` = row/delete/note/schema、`record_id`）。
+- `notes`（分片库）：记录备注（评论），**只增不改**（没有 update / delete 语句与接口）
+- `note_mentions`（用户库）：备注里 @ 到的人 → 收件箱私信；`read_at` 为 NULL 表示未读（就是红点里的数字）。
+  它冗余了 `database_id` / `record_id`，展示时按分片去取表格名与记录标题；**没有**指向 `notes` 的外键（备注在分片库里）
+- `database_changes`（分片库）：多人协作的**改动日志**（`rev` 在主键上自增、`kind` = row/delete/note/schema、`record_id`）。
   客户端带着看过的最大 `rev` 轮询增量接口；日志永远写在数据之后（先写数据、再写日志），
   所以「先读 rev 再读数据」不会漏改动，最多重复下发一次（客户端按 id 合并，幂等）。
   写入时以 1/20 的概率顺手清掉 7 天前的旧日志；日志被清过 / 攒了太多改动（> 500 条）时接口回
@@ -189,12 +206,20 @@ GET    /api/admin/settings                 （「后台 → 站点设置」当�
 PATCH  /api/admin/settings                 （保存站点名称 / 管理员邮箱 / 发件人 / Resend 密钥，返回最新 branding）
 POST   /api/admin/settings/icon            （上传 / 替换站点图标，multipart 字段 `file`）
 DELETE /api/admin/settings/icon            （移除站点图标）
+GET    /api/admin/shards                   （「后台 → 存储分片」：分片总览 + 每片明细 + 小结）
+POST   /api/admin/shards                   （新建 D1 库并挂载成分片；需要 Cloudflare API 凭据）
+POST   /api/admin/shards/mount             （挂载一个已有的 D1 库）
+GET    /api/admin/shards/databases         （账号下的 D1 库列表，挑一个来挂载）
+POST   /api/admin/shards/refresh           （去 Cloudflare 刷新所有分片的用量）
+PATCH  /api/admin/shards/:id               （改名 / 备注 / 启停 / 绑定名）
+DELETE /api/admin/shards/:id               （从注册表摘掉，不动 D1 库里的数据）
 GET    /api/health
 ```
 
 ## 部署
 
-见 [DEPLOY.md](./DEPLOY.md)（创建 D1 / R2、替换 `wrangler.jsonc` 中的 `database_id`、远程迁移、`npm run deploy`）。
+见 [DEPLOY.md](./DEPLOY.md)（创建用户库 + 两个表格分片库 / R2、替换 `wrangler.jsonc` 里的 `database_id`、远程迁移、`npm run deploy`），
+存储结构（分片路由、跨库没有外键、老数据搬迁）见 [docs/storage.md](./docs/storage.md)。
 
 ### 自动部署（GitHub Actions）
 

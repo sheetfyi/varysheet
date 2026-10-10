@@ -22,6 +22,17 @@ ADMIN_PASSWORD=Smoke1admin
 # 保留测试域白名单（wrangler.jsonc 里也配了一份，这里可以按需加自己的测试域）
 AUTH_ECHO_CODE_DOMAINS=example.com,example.org,example.net
 
+# ---- 表格分片库（storage split）------------------------------------------
+# 表格数据存在独立的分片库（wrangler.jsonc 里的 DB_TABLES_BASIC / DB_TABLES_PRO）。
+# 本地 `wrangler dev --local` 直接按 database_id 建本地 sqlite，所以下面两项**可以留空**：
+# 绑定上的主分片不需要走 HTTP 接口。
+# 只有当你想在本地试用「后台 → 存储分片 → 新建备用库 / 查看用量」（动态挂载的库
+# 没法加 Worker 绑定，只能走 Cloudflare D1 HTTP 接口）时才需要填：
+#   CLOUDFLARE_ACCOUNT_ID   Cloudflare 账号 ID（wrangler whoami 里能看到）
+#   CLOUDFLARE_API_TOKEN    需要 Account > D1 > Edit 权限
+CLOUDFLARE_ACCOUNT_ID=
+CLOUDFLARE_API_TOKEN=
+
 # 基础表格的容量上限（wrangler.jsonc 里也配了一份，这里改的是本地 dev 的值）。
 # 到上限后只拦「增长」：新建 / 批量新建 / 复制记录 / 上传附件会被
 # 403 capacity_exceeded 挡下，查看 / 查询 / 改已有记录 / 删除都不受影响；

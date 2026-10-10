@@ -14,6 +14,7 @@ import type { ViewInviteInfo } from '../shared/types';
 import { emailFailure, sendEmail, shouldEchoCode, viewInviteEmail } from './email';
 import { badGateway, newId, randomToken, sqlNullableNumber, sqlNumber, sqlString, type SqlRow } from './http';
 import { loadSiteSettings } from './settings';
+import { findEntityShard } from './shards';
 import type { Env } from './types';
 
 export type InviteRole = 'viewer' | 'editor';
@@ -56,10 +57,24 @@ export function inviteIsUsable(invite: ViewInviteRecord, now = Date.now()): bool
   return invite.acceptedAt === null && invite.expiresAt > now;
 }
 
-export async function loadInviteByToken(env: Env, token: string): Promise<ViewInviteRecord | null> {
+/** 邀请 + 它所在的分片（token 是全局唯一的，探测一次就把两样都拿到）。 */
+export interface LoadedInvite {
+  invite: ViewInviteRecord;
+  db: D1Database;
+}
+
+/**
+ * 按 token 取出邀请。
+ *
+ * `invites` 表随表格落在分片里，而 token 不是表格 id，所以只能逐分片探测
+ * （`findEntityShard` 命中即止，结果按 isolate 缓存）。
+ */
+export async function loadInviteByToken(env: Env, token: string): Promise<LoadedInvite | null> {
   if (!token) return null;
-  const row = await env.DB.prepare('SELECT * FROM invites WHERE token = ?').bind(token).first<SqlRow>();
-  return row ? inviteFromRow(row) : null;
+  const handle = await findEntityShard(env, 'invites', 'token', token);
+  if (!handle) return null;
+  const row = await handle.db.prepare('SELECT * FROM invites WHERE token = ?').bind(token).first<SqlRow>();
+  return row ? { invite: inviteFromRow(row), db: handle.db } : null;
 }
 
 /** 邀请链接：`<origin>/invite/<token>`（前端 SPA 路由，见 client/App.tsx）。 */
@@ -70,9 +85,11 @@ export function inviteLink(origin: string, token: string): string {
 /**
  * 为「还没注册的邮箱」发一条视图分享邀请（同一个视图上的旧邀请会被替换）。
  * 只写库，不投递邮件（投递见 {@link deliverViewInvite}）。
+ *
+ * `db` 是这张表格所在的分片（调用方已经做过访问检查，传 `tableDb(ctx)`）。
  */
 export async function issueViewInvite(
-  env: Env,
+  db: D1Database,
   input: {
     email: string;
     databaseId: string;
@@ -84,7 +101,8 @@ export async function issueViewInvite(
 ): Promise<ViewInviteRecord> {
   const now = Date.now();
   // 同一个邮箱 + 视图：旧的待接受邀请作废（重发 / 换角色都以最新一次为准）
-  await env.DB.prepare('DELETE FROM invites WHERE email = ? AND view_id = ? AND accepted_at IS NULL')
+  await db
+    .prepare('DELETE FROM invites WHERE email = ? AND view_id = ? AND accepted_at IS NULL')
     .bind(input.email, input.viewId)
     .run();
 
@@ -102,10 +120,11 @@ export async function issueViewInvite(
     acceptedAt: null,
   };
 
-  await env.DB.prepare(
-    `INSERT INTO invites (id, token, email, database_id, view_id, role, limit_edits, invited_by, created_at, expires_at, accepted_at)
+  await db
+    .prepare(
+      `INSERT INTO invites (id, token, email, database_id, view_id, role, limit_edits, invited_by, created_at, expires_at, accepted_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
-  )
+    )
     .bind(
       invite.id,
       invite.token,
@@ -122,7 +141,7 @@ export async function issueViewInvite(
 
   // 顺手清掉过期很久的记录，省得表一直长
   if (Math.random() < 0.05) {
-    await env.DB.prepare('DELETE FROM invites WHERE expires_at < ?').bind(now - 30 * 86_400_000).run();
+    await db.prepare('DELETE FROM invites WHERE expires_at < ?').bind(now - 30 * 86_400_000).run();
   }
 
   return invite;
@@ -131,21 +150,27 @@ export async function issueViewInvite(
 /** 邀请里需要展示的信息（表格名 / 视图名 / 邀请人）。 */
 export async function inviteContext(
   env: Env,
+  db: D1Database,
   invite: ViewInviteRecord,
 ): Promise<{ databaseName: string; viewName: string; inviterName: string }> {
-  const row = await env.DB.prepare(
-    `SELECT d.name AS database_name, v.name AS view_name, u.name AS inviter_name, u.email AS inviter_email
-       FROM databases d
-       JOIN views v ON v.id = ?
-       LEFT JOIN users u ON u.id = ?
-      WHERE d.id = ?`,
-  )
-    .bind(invite.viewId, invite.invitedBy, invite.databaseId)
-    .first<SqlRow>();
+  // 表格名 / 视图名在分片里；邀请人的昵称在用户库（跨库没法 JOIN，查两次再拼）
+  const [tableRow, inviterRow] = await Promise.all([
+    db
+      .prepare(
+        `SELECT d.name AS database_name, v.name AS view_name
+           FROM databases d JOIN views v ON v.id = ? AND v.database_id = d.id
+          WHERE d.id = ?`,
+      )
+      .bind(invite.viewId, invite.databaseId)
+      .first<SqlRow>(),
+    invite.invitedBy
+      ? env.DB.prepare('SELECT name, email FROM users WHERE id = ?').bind(invite.invitedBy).first<SqlRow>()
+      : Promise.resolve(null),
+  ]);
   return {
-    databaseName: sqlString(row ?? {}, 'database_name', '表格'),
-    viewName: sqlString(row ?? {}, 'view_name', '视图'),
-    inviterName: sqlString(row ?? {}, 'inviter_name') || sqlString(row ?? {}, 'inviter_email'),
+    databaseName: sqlString(tableRow ?? {}, 'database_name', '表格'),
+    viewName: sqlString(tableRow ?? {}, 'view_name', '视图'),
+    inviterName: sqlString(inviterRow ?? {}, 'name') || sqlString(inviterRow ?? {}, 'email'),
   };
 }
 
@@ -155,13 +180,16 @@ export async function inviteContext(
  * 和注册确认码一样：没配 `RESEND_API_KEY` 或收件人是保留测试域时**不发信**、
  * 直接把链接回显在响应里（`inviteUrl`），本地开发与自动化测试才能走完整个流程。
  * 真的发信失败时删掉这条邀请并抛 502 —— 保证「库里有邀请 ⇒ 邮件已经寄出」。
+ *
+ * `db` 是这张表格所在的分片（邀请记录与表格数据同库）。
  */
 export async function deliverViewInvite(
   env: Env,
+  db: D1Database,
   invite: ViewInviteRecord,
   origin: string,
 ): Promise<ViewInviteInfo> {
-  const { databaseName, viewName, inviterName } = await inviteContext(env, invite);
+  const { databaseName, viewName, inviterName } = await inviteContext(env, db, invite);
   const url = inviteLink(origin, invite.token);
   const base = {
     email: invite.email,
@@ -192,7 +220,7 @@ export async function deliverViewInvite(
   });
 
   if (!delivery.ok) {
-    await env.DB.prepare('DELETE FROM invites WHERE id = ?').bind(invite.id).run();
+    await db.prepare('DELETE FROM invites WHERE id = ?').bind(invite.id).run();
     if (delivery.reason === 'not_configured') {
       throw badGateway('邀请邮件发送失败：未配置 RESEND_API_KEY，无法向未注册邮箱发送邀请链接');
     }
@@ -203,6 +231,6 @@ export async function deliverViewInvite(
 }
 
 /** 标记邀请已被接受（一次性，之后链接失效）。 */
-export async function consumeInvite(env: Env, inviteId: string): Promise<void> {
-  await env.DB.prepare('UPDATE invites SET accepted_at = ? WHERE id = ?').bind(Date.now(), inviteId).run();
+export async function consumeInvite(db: D1Database, inviteId: string): Promise<void> {
+  await db.prepare('UPDATE invites SET accepted_at = ? WHERE id = ?').bind(Date.now(), inviteId).run();
 }

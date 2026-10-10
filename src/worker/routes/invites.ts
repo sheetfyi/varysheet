@@ -10,7 +10,7 @@
  */
 import type { InviteAcceptResponse, InviteDetail } from '../../shared/types';
 import { assertSignupAllowed, createSession, hashPassword, isSecureRequest, sessionCookie, sessionTokenPayload, validatePasswordStrength, wantsTokenInBody } from '../auth';
-import { consumeInvite, inviteContext, loadInviteByToken, type ViewInviteRecord } from '../invites';
+import { consumeInvite, inviteContext, loadInviteByToken, type LoadedInvite, type ViewInviteRecord } from '../invites';
 import { loadSiteSettings, siteIconUrl } from '../settings';
 import {
   HttpError,
@@ -24,28 +24,30 @@ import {
   sqlString,
   type SqlRow,
 } from '../http';
-import type { Env, RequestContext, Route } from '../types';
+import type { RequestContext, Route } from '../types';
 import { logChanges } from '../changes';
 import { touchDatabase } from './databases';
 
 /** 取出一条仍然可用的邀请（不存在 / 用过 / 过期都会给出对应的提示）。 */
-async function requireInvite(ctx: RequestContext): Promise<ViewInviteRecord> {
-  const invite = await loadInviteByToken(ctx.env, ctx.params.token ?? '');
-  if (!invite) throw notFound('邀请链接无效，请让分享者重新发送');
+async function requireInvite(ctx: RequestContext): Promise<LoadedInvite> {
+  const loaded = await loadInviteByToken(ctx.env, ctx.params.token ?? '');
+  if (!loaded) throw notFound('邀请链接无效，请让分享者重新发送');
+  const { invite } = loaded;
   if (invite.acceptedAt !== null) throw conflict('这个邀请已经用过了，请直接登录', 'invite_used');
   if (invite.expiresAt <= Date.now()) {
     throw new HttpError(410, 'invite_expired', '邀请链接已过期，请让分享者重新发送');
   }
-  return invite;
+  return loaded;
 }
 
 /** 把邀请里的那条视图分享写给 `userId`（同一个视图重复接受时更新角色）。 */
-async function applyViewShare(env: Env, invite: ViewInviteRecord, userId: string): Promise<void> {
-  await env.DB.prepare(
-    `INSERT INTO view_shares (id, database_id, view_id, user_id, role, limit_edits, created_by, created_at)
+async function applyViewShare(db: D1Database, invite: ViewInviteRecord, userId: string): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO view_shares (id, database_id, view_id, user_id, role, limit_edits, created_by, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT (view_id, user_id) DO UPDATE SET role = excluded.role, limit_edits = excluded.limit_edits`,
-  )
+    )
     .bind(
       newId(),
       invite.databaseId,
@@ -58,13 +60,13 @@ async function applyViewShare(env: Env, invite: ViewInviteRecord, userId: string
     )
     .run();
   // 表格页开着的人（所有者 / 其它被分享者）跟着刷新
-  await touchDatabase(env, invite.databaseId);
-  await logChanges(env, invite.databaseId, 'schema');
+  await touchDatabase(db, invite.databaseId);
+  await logChanges(db, invite.databaseId, 'schema');
 }
 
 async function inviteDetailHandler(ctx: RequestContext): Promise<Response> {
-  const invite = await requireInvite(ctx);
-  const { databaseName, viewName, inviterName } = await inviteContext(ctx.env, invite);
+  const { invite, db } = await requireInvite(ctx);
+  const { databaseName, viewName, inviterName } = await inviteContext(ctx.env, db, invite);
   // 站点名称 / 图标由「后台 → 站点设置」决定（受邀人还没登录，也要看到正确的品牌）
   const settings = await loadSiteSettings(ctx.env);
   const detail: InviteDetail = {
@@ -85,7 +87,7 @@ async function inviteDetailHandler(ctx: RequestContext): Promise<Response> {
 async function acceptInviteHandler(ctx: RequestContext): Promise<Response> {
   const env = ctx.env;
   assertSignupAllowed(env);
-  const invite = await requireInvite(ctx);
+  const { invite, db } = await requireInvite(ctx);
   const body = await readJson(ctx.request);
   const email = invite.email;
   const name = asString(body.name, '昵称', { max: 60 }) || email.split('@')[0] || '用户';
@@ -99,8 +101,8 @@ async function acceptInviteHandler(ctx: RequestContext): Promise<Response> {
     .bind(email)
     .first<SqlRow>();
   if (existing) {
-    await applyViewShare(env, invite, sqlString(existing, 'id'));
-    await consumeInvite(env, invite.id);
+    await applyViewShare(db, invite, sqlString(existing, 'id'));
+    await consumeInvite(db, invite.id);
     throw conflict('该邮箱已经注册过了，这条视图分享已加到你的账号上，请直接登录查看', 'email_exists');
   }
 
@@ -113,8 +115,8 @@ async function acceptInviteHandler(ctx: RequestContext): Promise<Response> {
     .bind(userId, email, name, await hashPassword(password, env), now, now)
     .run();
 
-  await applyViewShare(env, invite, userId);
-  await consumeInvite(env, invite.id);
+  await applyViewShare(db, invite, userId);
+  await consumeInvite(db, invite.id);
 
   // 新账号不再自动建「我的第一个表格」：邀请进来的用户直接看被分享的视图
   const session = await createSession(env, userId);

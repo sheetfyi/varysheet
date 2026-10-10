@@ -11,7 +11,7 @@
  *
  * 购买走 `POST /api/quota/purchases`（body `{ kind, count }`）：写一条流水并**立刻**
  * 生效 —— 买几个就多几个可添加的表格。支付网关还没接入，渠道先记 `self-serve`，
- * 见 migrations/0011_table_kinds_and_purchases.sql 的说明。
+ * 见 migrations/control/0011_table_kinds_and_purchases.sql 的说明。
  */
 import { MAX_PURCHASE_COUNT, tableQuotaSetOf } from '../../shared/quota';
 import type { TableKind, TablePurchase, TableQuotaSet } from '../../shared/types';
@@ -28,50 +28,91 @@ import {
   type SqlRow,
 } from '../http';
 import type { Env, RequestContext, Route } from '../types';
+import { forEachShardSafe } from '../shards';
 
 /** 一次购买只认这两种类型（写库前先卡住，库里不会出现第三种值） */
 const PURCHASE_KINDS = ['basic', 'pro'] as const;
 
-/** 算一个账号当前的名额（会话下发、`/api/quota` 与购买响应共用） */
+/** 分片里的名额统计列：`used_*`（自己拥有）/ `link_*`（公开链接）/ `view_*` / `member_*` */
+const QUOTA_COUNT_COLUMNS = [
+  'used_basic',
+  'used_pro',
+  'link_basic',
+  'link_pro',
+  'view_basic',
+  'view_pro',
+  'member_basic',
+  'member_pro',
+] as const;
+
+/**
+ * 算一个账号当前的名额（会话下发、`/api/quota` 与购买响应共用）。
+ *
+ * 存储拆分之后数据不在一个库里：表格侧的统计逐分片算再相加（某个分片暂时不可用
+ * 只会少算几张表），购买流水仍然在用户库的 `table_purchases`。
+ */
 export async function loadTableQuota(env: Env, userId: string): Promise<TableQuotaSet> {
-  const row =
-    (await env.DB.prepare(
-      `SELECT
-       (SELECT COUNT(*) FROM databases
-         WHERE owner_id = ? AND is_archived = 0 AND kind = 'basic') AS used_basic,
-       (SELECT COUNT(*) FROM databases
-         WHERE owner_id = ? AND is_archived = 0 AND kind = 'pro') AS used_pro,
-       (SELECT COUNT(*) FROM shares s JOIN databases d ON d.id = s.database_id
-         WHERE d.owner_id = ? AND d.is_archived = 0 AND d.kind = 'basic') AS link_basic,
-       (SELECT COUNT(*) FROM shares s JOIN databases d ON d.id = s.database_id
-         WHERE d.owner_id = ? AND d.is_archived = 0 AND d.kind = 'pro') AS link_pro,
-       (SELECT COUNT(*) FROM view_shares v JOIN databases d ON d.id = v.database_id
-         WHERE d.owner_id = ? AND d.is_archived = 0 AND d.kind = 'basic') AS view_basic,
-       (SELECT COUNT(*) FROM view_shares v JOIN databases d ON d.id = v.database_id
-         WHERE d.owner_id = ? AND d.is_archived = 0 AND d.kind = 'pro') AS view_pro,
-       (SELECT COUNT(*) FROM database_members m JOIN databases d ON d.id = m.database_id
-         WHERE d.owner_id = ? AND d.is_archived = 0 AND d.kind = 'basic') AS member_basic,
-       (SELECT COUNT(*) FROM database_members m JOIN databases d ON d.id = m.database_id
-         WHERE d.owner_id = ? AND d.is_archived = 0 AND d.kind = 'pro') AS member_pro,
+  const scans = await forEachShardSafe(env, async (_shard, db) => {
+    const row = await db
+      .prepare(
+        `SELECT
+           (SELECT COUNT(*) FROM databases
+             WHERE owner_id = ? AND is_archived = 0 AND kind = 'basic') AS used_basic,
+           (SELECT COUNT(*) FROM databases
+             WHERE owner_id = ? AND is_archived = 0 AND kind = 'pro') AS used_pro,
+           (SELECT COUNT(*) FROM shares s JOIN databases d ON d.id = s.database_id
+             WHERE d.owner_id = ? AND d.is_archived = 0 AND d.kind = 'basic') AS link_basic,
+           (SELECT COUNT(*) FROM shares s JOIN databases d ON d.id = s.database_id
+             WHERE d.owner_id = ? AND d.is_archived = 0 AND d.kind = 'pro') AS link_pro,
+           (SELECT COUNT(*) FROM view_shares v JOIN databases d ON d.id = v.database_id
+             WHERE d.owner_id = ? AND d.is_archived = 0 AND d.kind = 'basic') AS view_basic,
+           (SELECT COUNT(*) FROM view_shares v JOIN databases d ON d.id = v.database_id
+             WHERE d.owner_id = ? AND d.is_archived = 0 AND d.kind = 'pro') AS view_pro,
+           (SELECT COUNT(*) FROM database_members m JOIN databases d ON d.id = m.database_id
+             WHERE d.owner_id = ? AND d.is_archived = 0 AND d.kind = 'basic') AS member_basic,
+           (SELECT COUNT(*) FROM database_members m JOIN databases d ON d.id = m.database_id
+             WHERE d.owner_id = ? AND d.is_archived = 0 AND d.kind = 'pro') AS member_pro`,
+      )
+      .bind(userId, userId, userId, userId, userId, userId, userId, userId)
+      .first<SqlRow>();
+    return row ?? {};
+  });
+
+  const counts: Record<(typeof QUOTA_COUNT_COLUMNS)[number], number> = {
+    used_basic: 0,
+    used_pro: 0,
+    link_basic: 0,
+    link_pro: 0,
+    view_basic: 0,
+    view_pro: 0,
+    member_basic: 0,
+    member_pro: 0,
+  };
+  for (const scan of scans) {
+    if (!scan.value) continue;
+    for (const column of QUOTA_COUNT_COLUMNS) counts[column] += sqlNumber(scan.value, column);
+  }
+
+  const purchaseRow = await env.DB.prepare(
+    `SELECT
        (SELECT COALESCE(SUM(p.count), 0) FROM table_purchases p
          WHERE p.user_id = ? AND p.kind = 'basic') AS bought_basic,
        (SELECT COALESCE(SUM(p.count), 0) FROM table_purchases p
          WHERE p.user_id = ? AND p.kind = 'pro') AS bought_pro`,
-    )
-      .bind(userId, userId, userId, userId, userId, userId, userId, userId, userId, userId)
-      .first<SqlRow>()) ?? {};
+  )
+    .bind(userId, userId)
+    .first<SqlRow>();
 
   return tableQuotaSetOf({
     basic: {
-      used: sqlNumber(row, 'used_basic'),
-      shared:
-        sqlNumber(row, 'link_basic') + sqlNumber(row, 'view_basic') + sqlNumber(row, 'member_basic'),
-      purchased: sqlNumber(row, 'bought_basic'),
+      used: counts.used_basic,
+      shared: counts.link_basic + counts.view_basic + counts.member_basic,
+      purchased: sqlNumber(purchaseRow ?? {}, 'bought_basic'),
     },
     pro: {
-      used: sqlNumber(row, 'used_pro'),
-      shared: sqlNumber(row, 'link_pro') + sqlNumber(row, 'view_pro') + sqlNumber(row, 'member_pro'),
-      purchased: sqlNumber(row, 'bought_pro'),
+      used: counts.used_pro,
+      shared: counts.link_pro + counts.view_pro + counts.member_pro,
+      purchased: sqlNumber(purchaseRow ?? {}, 'bought_pro'),
     },
   });
 }

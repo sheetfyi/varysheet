@@ -21,7 +21,6 @@ import { CELL_EDIT_GRACE_MS, cellLockHint, cellLockKey, isEmptyValue, sameCellVa
 import type { CellEditLocks, Property, RowValues } from '../shared/types';
 import type { DatabaseAccess, ShareAccess } from './access';
 import { forbidden, newId, parseJsonObject, sqlNumber, sqlString, type SqlRow } from './http';
-import type { Env } from './types';
 
 /** D1 单条 SQL 最多绑定 100 个参数：每行 6 列，因此一次最多写 10 行 */
 const INSERT_CHUNK = 10;
@@ -76,7 +75,7 @@ export function changedPropertyIds(
  * 所以这里要连 `records."values"` 一起查。
  */
 export async function loadCellEditLocks(
-  env: Env,
+  db: D1Database,
   databaseId: string,
   editorKey: string | null,
   recordIds: string[],
@@ -86,7 +85,7 @@ export async function loadCellEditLocks(
   const now = Date.now();
   for (let index = 0; index < recordIds.length; index += SELECT_CHUNK) {
     const slice = recordIds.slice(index, index + SELECT_CHUNK);
-    const { results } = await env.DB.prepare(
+    const { results } = await db.prepare(
       `SELECT ce.record_id, ce.property_id, ce.created_at, r."values" AS row_values
          FROM cell_edits ce JOIN records r ON r.id = ce.record_id
         WHERE ce.database_id = ? AND ce.editor_key = ? AND ce.record_id IN (${slice.map(() => '?').join(', ')})`,
@@ -115,7 +114,7 @@ export async function loadCellEditLocks(
  * - `editorKey` 为 null（表格所有者 / 表格成员 / 不受限的分享）时直接放行。
  */
 export async function assertCellsEditable(
-  env: Env,
+  db: D1Database,
   databaseId: string,
   editorKey: string | null,
   recordId: string,
@@ -123,7 +122,7 @@ export async function assertCellsEditable(
   properties: Property[],
 ): Promise<void> {
   if (!editorKey || !propertyIds.length) return;
-  const { results } = await env.DB.prepare(
+  const { results } = await db.prepare(
     `SELECT ce.property_id, ce.created_at, r."values" AS row_values
        FROM cell_edits ce JOIN records r ON r.id = ce.record_id
       WHERE ce.database_id = ? AND ce.editor_key = ? AND ce.record_id = ?`,
@@ -155,14 +154,14 @@ export async function assertCellsEditable(
  * 文件上传 / 删除附件这类绕过 PATCH 的入口用它，窗口内与空值同样放行。
  */
 export async function isCellLocked(
-  env: Env,
+  db: D1Database,
   databaseId: string,
   editorKey: string | null,
   recordId: string,
   propertyId: string,
 ): Promise<boolean> {
   if (!editorKey) return false;
-  const row = await env.DB.prepare(
+  const row = await db.prepare(
     `SELECT ce.created_at, r."values" AS row_values
        FROM cell_edits ce JOIN records r ON r.id = ce.record_id
       WHERE ce.database_id = ? AND ce.editor_key = ? AND ce.record_id = ? AND ce.property_id = ?`,
@@ -186,7 +185,7 @@ export async function isCellLocked(
  * `editorKey` 为 null（表格所有者 / 表格成员 / 不受限的分享）时什么都不做。
  */
 export async function applyCellEdits(
-  env: Env,
+  db: D1Database,
   databaseId: string,
   editorKey: string | null,
   recordId: string,
@@ -203,7 +202,8 @@ export async function applyCellEdits(
 
   for (let index = 0; index < cleared.length; index += DELETE_CHUNK) {
     const slice = cleared.slice(index, index + DELETE_CHUNK);
-    await env.DB.prepare(
+    await db
+      .prepare(
       `DELETE FROM cell_edits
         WHERE database_id = ? AND editor_key = ? AND record_id = ?
           AND property_id IN (${slice.map(() => '?').join(', ')})`,
@@ -218,7 +218,8 @@ export async function applyCellEdits(
     const slice = filled.slice(index, index + INSERT_CHUNK);
     const placeholders = slice.map(() => '(?, ?, ?, ?, ?, ?)').join(', ');
     // 已有记录就刷新时刻：每次输入都重新开始 10 秒计时
-    await env.DB.prepare(
+    await db
+      .prepare(
       `INSERT INTO cell_edits (id, database_id, record_id, property_id, editor_key, created_at)
        VALUES ${placeholders}
        ON CONFLICT (editor_key, record_id, property_id) DO UPDATE SET created_at = excluded.created_at`,

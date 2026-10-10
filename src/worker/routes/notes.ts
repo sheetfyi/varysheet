@@ -9,6 +9,7 @@ import { requireUser } from '../auth';
 import { logChanges } from '../changes';
 import { asString, badRequest, json, newId, notFound, readJson, sqlString, type SqlRow } from '../http';
 import { loadInboxMessages, loadNotes, mentionableUserIds, unreadMentionCount } from '../notes';
+import { tableDb } from '../shards';
 import type { RequestContext, Route } from '../types';
 
 /** 单条备注的最大长度（字符） */
@@ -18,39 +19,50 @@ const MAX_NOTE_LENGTH = 2000;
  * 添加备注。请求体：
  *   { body: string, mentions?: string[] }   // mentions 是被 @ 到的用户 id
  * 只有对该表格有访问权的人会被 @ 到，也不会给自己发私信。
+ *
+ * 备注写在**表格分片**里（跟着表格走），被 @ 的人写在**用户库**的 `note_mentions`
+ * （收件箱是「按人」查的）—— 两个库没法放进一个 batch，各自提交一次。
  */
 async function createNoteHandler(ctx: RequestContext): Promise<Response> {
   const user = await requireUser(ctx.request, ctx.env);
-  const access = await accessForRecord(ctx.env, ctx.params.id, user, 'view');
+  const access = await accessForRecord(ctx, ctx.params.id, user, 'view');
+  const db = tableDb(ctx);
   const body = await readJson(ctx.request);
   const text = asString(body.body, '备注内容', { required: true, max: MAX_NOTE_LENGTH });
   const requested = Array.isArray(body.mentions) ? body.mentions.map(String) : [];
   if (requested.length > 50) throw badRequest('单条备注最多 @ 50 个人');
 
-  const allowed = await mentionableUserIds(ctx.env, access.databaseId);
+  const allowed = await mentionableUserIds(ctx.env, db, access.databaseId);
   const targets = [...new Set(requested)].filter((id) => id !== user.id && allowed.has(id));
 
   const noteId = newId();
   const now = Date.now();
-  const statements = [
-    ctx.env.DB.prepare(
-      `INSERT INTO notes (id, database_id, record_id, author_id, body, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-    ).bind(noteId, access.databaseId, access.recordId, user.id, text, now),
+  const statements: D1PreparedStatement[] = [
+    db
+      .prepare(
+        `INSERT INTO notes (id, database_id, record_id, author_id, body, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(noteId, access.databaseId, access.recordId, user.id, text, now),
   ];
+  const mentions: D1PreparedStatement[] = [];
   for (const targetId of targets) {
-    statements.push(
+    mentions.push(
       ctx.env.DB.prepare(
         `INSERT OR IGNORE INTO note_mentions (id, note_id, database_id, record_id, user_id, read_at, created_at)
          VALUES (?, ?, ?, ?, ?, NULL, ?)`,
       ).bind(newId(), noteId, access.databaseId, access.recordId, targetId, now),
     );
   }
-  await ctx.env.DB.batch(statements);
+  // 备注在分片、@提醒在用户库：两边各自一个 batch（没人被 @ 时跳过用户库那一次，
+  // D1 的 `batch([])` 会报 `No SQL statements detected`）
+  const writes = [db.batch(statements)];
+  if (mentions.length) writes.push(ctx.env.DB.batch(mentions));
+  await Promise.all(writes);
   // 新备注：别人开着的记录卡片不用刷新就会出现（备注只增不改，合并即可）
-  await logChanges(ctx.env, access.databaseId, 'note', [access.recordId]);
+  await logChanges(db, access.databaseId, 'note', [access.recordId]);
 
-  return json({ notes: await loadNotes(ctx.env, [access.recordId]) }, { status: 201 });
+  return json({ notes: await loadNotes(ctx.env, db, [access.recordId]) }, { status: 201 });
 }
 
 /** 未读私信列表 + 红点里的数字。 */

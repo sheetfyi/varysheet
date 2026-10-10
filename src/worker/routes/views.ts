@@ -20,6 +20,7 @@ import {
   type SqlRow,
 } from '../http';
 import { viewFromRow } from '../mappers';
+import { tableDb } from '../shards';
 import type { RequestContext, Route } from '../types';
 import { loadProperties, loadViews, touchDatabase } from './databases';
 
@@ -104,8 +105,9 @@ export function sanitizeViewConfig(
   };
 }
 
-async function nextViewPosition(ctx: RequestContext, databaseId: string): Promise<number> {
-  const row = await ctx.env.DB.prepare('SELECT MAX(position) AS max_position FROM views WHERE database_id = ?')
+async function nextViewPosition(db: D1Database, databaseId: string): Promise<number> {
+  const row = await db
+    .prepare('SELECT MAX(position) AS max_position FROM views WHERE database_id = ?')
     .bind(databaseId)
     .first<SqlRow>();
   const value = row?.max_position;
@@ -113,8 +115,9 @@ async function nextViewPosition(ctx: RequestContext, databaseId: string): Promis
 }
 
 /** 现有视图数：视图数上限的判断用 */
-async function countViews(ctx: RequestContext, databaseId: string): Promise<number> {
-  const row = await ctx.env.DB.prepare('SELECT COUNT(*) AS total FROM views WHERE database_id = ?')
+async function countViews(db: D1Database, databaseId: string): Promise<number> {
+  const row = await db
+    .prepare('SELECT COUNT(*) AS total FROM views WHERE database_id = ?')
     .bind(databaseId)
     .first<SqlRow>();
   return sqlNumber(row ?? {}, 'total');
@@ -122,13 +125,14 @@ async function countViews(ctx: RequestContext, databaseId: string): Promise<numb
 
 async function createViewHandler(ctx: RequestContext): Promise<Response> {
   const user = await requireUser(ctx.request, ctx.env);
-  const access = await requireDatabaseAccess(ctx.env, ctx.params.id, user, 'edit');
+  const access = await requireDatabaseAccess(ctx, ctx.params.id, user, 'edit');
   assertStructureEditable(access);
+  const db = tableDb(ctx);
 
   // 视图数上限：基础表格最多 3 个视图、专业表格 10 个（只拦新增 ——
   // 已经超限的老表仍然能改名 / 改配置 / 删视图）
-  const meta = tableKindMeta(await loadDatabaseKind(ctx.env, ctx.params.id));
-  const viewCount = await countViews(ctx, ctx.params.id);
+  const meta = tableKindMeta(await loadDatabaseKind(db, ctx.params.id));
+  const viewCount = await countViews(db, ctx.params.id);
   if (viewCount >= meta.maxViews) {
     throw forbidden(
       `${meta.label}最多 ${meta.maxViews} 个视图（当前 ${viewCount} 个）：删掉一些视图后再添加，或换成专业表格`,
@@ -142,7 +146,7 @@ async function createViewHandler(ctx: RequestContext): Promise<Response> {
   const fallbackName = type === 'table' ? '表格视图' : type === 'board' ? '看板视图' : '画廊视图';
   const name = (typeof body.name === 'string' && body.name.trim()) || fallbackName;
 
-  const properties = await loadProperties(ctx.env, ctx.params.id);
+  const properties = await loadProperties(db, ctx.params.id);
   const propertyIds = new Set(properties.map((property) => property.id));
   const groupableIds = new Set(
     properties.filter((property) => FIELD_META[property.type].groupable).map((property) => property.id),
@@ -151,7 +155,8 @@ async function createViewHandler(ctx: RequestContext): Promise<Response> {
   // "duplicate view" - start from the config of an existing view
   let base = defaultViewConfig(type);
   if (body.copyOfViewId) {
-    const source = await ctx.env.DB.prepare('SELECT * FROM views WHERE id = ? AND database_id = ?')
+    const source = await db
+      .prepare('SELECT * FROM views WHERE id = ? AND database_id = ?')
       .bind(String(body.copyOfViewId), ctx.params.id)
       .first<SqlRow>();
     if (!source) throw notFound('被复制的视图不存在');
@@ -161,33 +166,35 @@ async function createViewHandler(ctx: RequestContext): Promise<Response> {
   const config = sanitizeViewConfig(type, body.config, base, propertyIds, groupableIds);
   const position =
     body.position === undefined
-      ? await nextViewPosition(ctx, ctx.params.id)
+      ? await nextViewPosition(db, ctx.params.id)
       : asNumberValue(body.position, 'position');
 
   const viewId = newId();
   const now = Date.now();
   const locked = body.locked === true ? 1 : 0;
-  await ctx.env.DB.prepare(
-    `INSERT INTO views (id, database_id, name, type, config, is_locked, position, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  )
+  await db
+    .prepare(
+      `INSERT INTO views (id, database_id, name, type, config, is_locked, position, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
     .bind(viewId, ctx.params.id, name.slice(0, 80), type, JSON.stringify(config), locked, position, now, now)
     .run();
-  await touchDatabase(ctx.env, ctx.params.id);
+  await touchDatabase(db, ctx.params.id);
   // 多了一个视图：别人的视图栏也跟着刷新
-  await logChanges(ctx.env, ctx.params.id, 'schema');
+  await logChanges(db, ctx.params.id, 'schema');
 
-  return json({ views: await loadViews(ctx.env, ctx.params.id), viewId }, { status: 201 });
+  return json({ views: await loadViews(db, ctx.params.id), viewId }, { status: 201 });
 }
 
 async function updateViewHandler(ctx: RequestContext): Promise<Response> {
   const user = await requireUser(ctx.request, ctx.env);
-  const access = await accessForView(ctx.env, ctx.params.id, user, 'edit');
+  const access = await accessForView(ctx, ctx.params.id, user, 'edit');
   assertStructureEditable(access);
   assertViewEditable(access, ctx.params.id);
+  const db = tableDb(ctx);
   const body = await readJson(ctx.request);
 
-  const row = await ctx.env.DB.prepare('SELECT * FROM views WHERE id = ?').bind(ctx.params.id).first<SqlRow>();
+  const row = await db.prepare('SELECT * FROM views WHERE id = ?').bind(ctx.params.id).first<SqlRow>();
   if (!row) throw notFound('视图不存在');
   const current: ViewDef = viewFromRow(row);
 
@@ -196,16 +203,16 @@ async function updateViewHandler(ctx: RequestContext): Promise<Response> {
     const onlyUnlock = body.locked === false && Object.keys(body).every((key) => key === 'locked');
     if (!onlyUnlock) throw forbidden('视图已锁定，请先解锁');
     if (access.role !== 'owner') throw forbidden('只有所有者可以解锁视图');
-    await ctx.env.DB.prepare('UPDATE views SET is_locked = 0, updated_at = ? WHERE id = ?')
+    await db.prepare('UPDATE views SET is_locked = 0, updated_at = ? WHERE id = ?')
       .bind(Date.now(), ctx.params.id)
       .run();
-    await touchDatabase(ctx.env, access.databaseId);
-    await logChanges(ctx.env, access.databaseId, 'schema');
-    return json({ views: await loadViews(ctx.env, access.databaseId) });
+    await touchDatabase(db, access.databaseId);
+    await logChanges(db, access.databaseId, 'schema');
+    return json({ views: await loadViews(db, access.databaseId) });
   }
 
   const type = body.type === undefined ? current.type : asEnum(body.type, VIEW_TYPES, '视图类型');
-  const properties = await loadProperties(ctx.env, access.databaseId);
+  const properties = await loadProperties(db, access.databaseId);
   const propertyIds = new Set(properties.map((property) => property.id));
   const groupableIds = new Set(
     properties.filter((property) => FIELD_META[property.type].groupable).map((property) => property.id),
@@ -242,33 +249,34 @@ async function updateViewHandler(ctx: RequestContext): Promise<Response> {
   if (fields.length) {
     fields.push('updated_at = ?');
     params.push(Date.now(), ctx.params.id);
-    await ctx.env.DB.prepare(`UPDATE views SET ${fields.join(', ')} WHERE id = ?`).bind(...params).run();
-    await touchDatabase(ctx.env, access.databaseId);
+    await db.prepare(`UPDATE views SET ${fields.join(', ')} WHERE id = ?`).bind(...params).run();
+    await touchDatabase(db, access.databaseId);
     // 视图改名 / 改筛选 / 排序 / 可见字段 / 锁定：结构改动，别人那边整表重载
-    await logChanges(ctx.env, access.databaseId, 'schema');
+    await logChanges(db, access.databaseId, 'schema');
   }
 
-  return json({ views: await loadViews(ctx.env, access.databaseId) });
+  return json({ views: await loadViews(db, access.databaseId) });
 }
 
 async function deleteViewHandler(ctx: RequestContext): Promise<Response> {
   const user = await requireUser(ctx.request, ctx.env);
-  const access = await accessForView(ctx.env, ctx.params.id, user, 'edit');
+  const access = await accessForView(ctx, ctx.params.id, user, 'edit');
   assertStructureEditable(access);
   assertViewEditable(access, ctx.params.id);
+  const db = tableDb(ctx);
 
-  const row = await ctx.env.DB.prepare('SELECT is_locked FROM views WHERE id = ?')
+  const row = await db.prepare('SELECT is_locked FROM views WHERE id = ?')
     .bind(ctx.params.id)
     .first<SqlRow>();
   if (row && Number(row.is_locked ?? 0) === 1) throw forbidden('视图已锁定，请先解锁再删除');
 
-  const views = await loadViews(ctx.env, access.databaseId);
+  const views = await loadViews(db, access.databaseId);
   if (views.length <= 1) throw badRequest('至少需要保留一个视图');
 
-  await ctx.env.DB.prepare('DELETE FROM views WHERE id = ?').bind(ctx.params.id).run();
-  await touchDatabase(ctx.env, access.databaseId);
-  await logChanges(ctx.env, access.databaseId, 'schema');
-  return json({ views: await loadViews(ctx.env, access.databaseId) });
+  await db.prepare('DELETE FROM views WHERE id = ?').bind(ctx.params.id).run();
+  await touchDatabase(db, access.databaseId);
+  await logChanges(db, access.databaseId, 'schema');
+  return json({ views: await loadViews(db, access.databaseId) });
 }
 
 export const viewRoutes: Route[] = [

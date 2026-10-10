@@ -19,10 +19,19 @@
     "run_worker_first": ["/api/*"]
   },
 
-  // ---- D1 database -------------------------------------------------------
-  // Created in the Cloudflare dashboard as "cloudnotion-db".
-  // CI runs `wrangler d1 migrations apply cloudnotion-db --remote`, which
-  // resolves the database by name, so keep the name in sync with the console.
+  // ---- D1 databases ------------------------------------------------------
+  // 存储拆成「用户库 + 表格分片库」，详见 docs/storage.md：
+  //   DB               用户库：账号 / 会话 / 站点设置 / 购买记录 / @提醒 / 分片注册表
+  //   DB_TABLES_BASIC  基础表格主分片（表格 / 字段 / 记录 / 视图 / 分享 / 备注 / 附件…）
+  //   DB_TABLES_PRO    专业表格主分片（结构同上）
+  // 建库方式（见 DEPLOY.md 1.1）：
+  //   npx wrangler d1 create cloudnotion-db
+  //   npx wrangler d1 create cloudnotion-tables-basic
+  //   npx wrangler d1 create cloudnotion-tables-pro
+  // 把返回的 database_id 填到下面（首次部署必须填真实值；本地 `wrangler dev --local`
+  // 只是按 id 命名本地 sqlite 文件，填占位值也能跑）。
+  // 迁移目录各自独立：control 目录放用户库的迁移，tables 目录放分片库的迁移
+  // （两者结构完全不同，所以不能共用目录）。
   // 注意：数据库名属于基础设施标识，与站点品牌名（vars.APP_NAME）互不相关；
   // 改品牌名不需要（也无法直接）重命名已建好的 D1 / R2 资源。
   "d1_databases": [
@@ -30,7 +39,19 @@
       "binding": "DB",
       "database_name": "cloudnotion-db",
       "database_id": "debb8909-afd9-4529-80ed-37be3ae12bbb",
-      "migrations_dir": "migrations"
+      "migrations_dir": "migrations/control"
+    },
+    {
+      "binding": "DB_TABLES_BASIC",
+      "database_name": "cloudnotion-tables-basic",
+      "database_id": "11111111-1111-4111-8111-111111111111",
+      "migrations_dir": "migrations/tables"
+    },
+    {
+      "binding": "DB_TABLES_PRO",
+      "database_name": "cloudnotion-tables-pro",
+      "database_id": "22222222-2222-4222-8222-222222222222",
+      "migrations_dir": "migrations/tables"
     }
   ],
 

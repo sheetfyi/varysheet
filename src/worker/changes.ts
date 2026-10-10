@@ -52,17 +52,20 @@ function emptyChanges(rev: number): DatabaseChanges {
 }
 
 /** 当前（全局）版本号。客户端第一次打开表格时拿它当起点。 */
-export async function headRev(env: Env): Promise<number> {
-  const row = await env.DB.prepare('SELECT COALESCE(MAX(rev), 0) AS rev FROM database_changes').first<SqlRow>();
+export async function headRev(db: D1Database): Promise<number> {
+  const row = await db.prepare('SELECT COALESCE(MAX(rev), 0) AS rev FROM database_changes').first<SqlRow>();
   return sqlNumber(row ?? {}, 'rev');
 }
 
 /**
  * 记下这次改动 —— 必须在**数据写完之后**调用（见文件头的约定）。
  * `recordIds` 省略时记一条「不针对具体记录」的改动（结构类改动）。
+ *
+ * `db` 是这张表所在的分片库：改动日志跟着表格走（`database_changes` 在分片里），
+ * 客户端拿着同一张表的 `since` 游标，所以版本号在分片内部自增就够了。
  */
 export async function logChanges(
-  env: Env,
+  db: D1Database,
   databaseId: string,
   kind: ChangeKind,
   recordIds: readonly (string | null)[] = [null],
@@ -71,9 +74,9 @@ export async function logChanges(
   const ids: (string | null)[] = recordIds.length ? [...recordIds] : [null];
   const now = Date.now();
   for (const slice of chunk(ids, LOG_CHUNK)) {
-    await env.DB.batch(
+    await db.batch(
       slice.map((recordId) =>
-        env.DB
+        db
           .prepare('INSERT INTO database_changes (database_id, record_id, kind, created_at) VALUES (?, ?, ?, ?)')
           .bind(databaseId, recordId, kind, now),
       ),
@@ -81,7 +84,7 @@ export async function logChanges(
   }
   // 顺手清理过期日志（低概率，避免每次写入都多一条 DELETE）
   if (Math.random() < PRUNE_CHANCE) {
-    await env.DB.prepare('DELETE FROM database_changes WHERE created_at < ?').bind(now - KEEP_MS).run();
+    await db.prepare('DELETE FROM database_changes WHERE created_at < ?').bind(now - KEEP_MS).run();
   }
 }
 
@@ -101,27 +104,29 @@ export interface ChangesScope {
  */
 export async function loadChanges(
   env: Env,
+  db: D1Database,
   databaseId: string,
   scope: ChangesScope,
   since: number,
 ): Promise<DatabaseChanges> {
-  const head = await headRev(env);
+  const head = await headRev(db);
   const cursor = Number.isFinite(since) && since > 0 ? Math.floor(since) : 0;
   // 游标永远不会退：日志被清空后 MAX(rev) 会回到 0，但自增序列仍在往前走
   const rev = Math.max(head, cursor);
 
   if (cursor > 0) {
-    const oldest = await env.DB.prepare('SELECT COALESCE(MIN(rev), 0) AS rev FROM database_changes').first<SqlRow>();
+    const oldest = await db.prepare('SELECT COALESCE(MIN(rev), 0) AS rev FROM database_changes').first<SqlRow>();
     // 现存最老的日志比游标还新（或者日志已被清空）：中间可能被清理过，无法保证完整
     if (sqlNumber(oldest ?? {}, 'rev') > cursor || head === 0) return emptyChanges(rev);
   }
 
-  const { results } = await env.DB.prepare(
-    `SELECT rev, record_id, kind FROM database_changes
-      WHERE database_id = ? AND rev > ?
-      ORDER BY rev ASC
-      LIMIT ?`,
-  )
+  const { results } = await db
+    .prepare(
+      `SELECT rev, record_id, kind FROM database_changes
+        WHERE database_id = ? AND rev > ?
+        ORDER BY rev ASC
+        LIMIT ?`,
+    )
     .bind(databaseId, cursor, MAX_CHANGES + 1)
     .all<SqlRow>();
 
@@ -152,14 +157,14 @@ export async function loadChanges(
   // 已经删掉的记录不必再下发（删除通知优先）
   for (const recordId of deletedRows) changedRows.delete(recordId);
 
-  const rows = await loadRowsByIds(env, databaseId, [...changedRows], scope);
+  const rows = await loadRowsByIds(db, databaseId, [...changedRows], scope);
   const [notes, total] = await Promise.all([
-    loadNotes(env, [...notedRows]),
-    countRecords(env, databaseId),
+    loadNotes(env, db, [...notedRows]),
+    countRecords(db, databaseId),
   ]);
   // 这一轮改动里的单元格锁定状态：只读的格子 + 还在 10 秒计时窗口内的格子
   const cellLocks = await loadCellEditLocks(
-    env,
+    db,
     databaseId,
     scope.editorKey,
     rows.map((row) => row.id),
@@ -188,7 +193,7 @@ function scopedProperties(properties: Property[], views: ViewDef[]): Property[] 
 
 /** 这些记录的最新值（已删除 / 归档的行不返回，定向分享的访客只拿得到被分享视图命中的行）。 */
 async function loadRowsByIds(
-  env: Env,
+  db: D1Database,
   databaseId: string,
   ids: string[],
   scope: ChangesScope,
@@ -196,10 +201,11 @@ async function loadRowsByIds(
   if (!ids.length) return [];
   const rows: RowRecord[] = [];
   for (const slice of chunk(ids, SELECT_CHUNK)) {
-    const { results } = await env.DB.prepare(
-      `SELECT * FROM records
-        WHERE database_id = ? AND is_archived = 0 AND id IN (${placeholders(slice.length)})`,
-    )
+    const { results } = await db
+      .prepare(
+        `SELECT * FROM records
+          WHERE database_id = ? AND is_archived = 0 AND id IN (${placeholders(slice.length)})`,
+      )
       .bind(databaseId, ...slice)
       .all<SqlRow>();
     for (const row of results ?? []) rows.push(recordFromRow(row));
@@ -208,8 +214,8 @@ async function loadRowsByIds(
 
   // 定向分享的访客只能看到被分享视图命中的行（与整表分页用的是同一套视图筛选）
   const [properties, views] = await Promise.all([
-    loadProperties(env, databaseId),
-    loadViews(env, databaseId, scope.viewIds),
+    loadProperties(db, databaseId),
+    loadViews(db, databaseId, scope.viewIds),
   ]);
   if (!views.length) return [];
   const visible = scopedProperties(properties, views);
@@ -218,26 +224,25 @@ async function loadRowsByIds(
   );
 }
 
-async function loadProperties(env: Env, databaseId: string): Promise<Property[]> {
-  const { results } = await env.DB.prepare(
-    'SELECT * FROM properties WHERE database_id = ? ORDER BY position ASC, created_at ASC',
-  )
+async function loadProperties(db: D1Database, databaseId: string): Promise<Property[]> {
+  const { results } = await db
+    .prepare('SELECT * FROM properties WHERE database_id = ? ORDER BY position ASC, created_at ASC')
     .bind(databaseId)
     .all<SqlRow>();
   return (results ?? []).map(propertyFromRow);
 }
 
-async function loadViews(env: Env, databaseId: string, viewIds: string[]): Promise<ViewDef[]> {
-  const { results } = await env.DB.prepare(
-    'SELECT * FROM views WHERE database_id = ? ORDER BY position ASC, created_at ASC',
-  )
+async function loadViews(db: D1Database, databaseId: string, viewIds: string[]): Promise<ViewDef[]> {
+  const { results } = await db
+    .prepare('SELECT * FROM views WHERE database_id = ? ORDER BY position ASC, created_at ASC')
     .bind(databaseId)
     .all<SqlRow>();
   return (results ?? []).map(viewFromRow).filter((view) => viewIds.includes(view.id));
 }
 
-async function countRecords(env: Env, databaseId: string): Promise<number> {
-  const row = await env.DB.prepare('SELECT COUNT(*) AS total FROM records WHERE database_id = ? AND is_archived = 0')
+async function countRecords(db: D1Database, databaseId: string): Promise<number> {
+  const row = await db
+    .prepare('SELECT COUNT(*) AS total FROM records WHERE database_id = ? AND is_archived = 0')
     .bind(databaseId)
     .first<SqlRow>();
   return sqlNumber(row ?? {}, 'total');

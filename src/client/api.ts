@@ -8,10 +8,12 @@
  * 由这里保存在本地并通过 `Authorization: Bearer` 头带上，见 `readSessionToken`。
  */
 import type {
+  AdminAccountDatabasesResponse,
   AdminDeleteUsersResponse,
   AdminPasswordResetResponse,
   AdminSettings,
   AdminSettingsResponse,
+  AdminShardsResponse,
   AdminUserListResponse,
   BrandingResponse,
   CellEditLocks,
@@ -231,6 +233,29 @@ export const api = {
   },
   /** 移除站点图标（退回内置的默认标识） */
   adminDeleteSiteIcon: () => json<AdminSettingsResponse>('/api/admin/settings/icon', 'DELETE'),
+
+  /**
+   * 「后台 → 存储分片」：表格数据分散在若干 D1 分片库里（见 docs/storage.md），
+   * 快满时在这里新建 / 挂载新的分片。新建、挂载与刷新用量都要 Cloudflare API 凭据
+   * （`CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_TOKEN`），没配时接口返回 501。
+   */
+  adminShards: () => json<AdminShardsResponse>('/api/admin/shards', 'GET'),
+  /** 新建一个 D1 库并挂载成分片（库名不填时按类型 + 日期自动生成） */
+  adminCreateShard: (body: { kind: TableKind; name?: string; note?: string }) =>
+    json<AdminShardsResponse>('/api/admin/shards', 'POST', body),
+  /** 挂载一个已经存在的 D1 库（会先执行一遍建表脚本，幂等） */
+  adminMountShard: (body: { databaseId: string; kind: TableKind; name?: string; note?: string; binding?: string }) =>
+    json<AdminShardsResponse>('/api/admin/shards/mount', 'POST', body),
+  /** 账号下的 D1 库（挂载现成的库时用来挑） */
+  adminAccountDatabases: () => json<AdminAccountDatabasesResponse>('/api/admin/shards/databases', 'GET'),
+  /** 去 Cloudflare 读一遍所有分片的用量并写回注册表 */
+  adminRefreshShards: () =>
+    json<AdminShardsResponse & { refreshed: number; failed: number }>('/api/admin/shards/refresh', 'POST', {}),
+  /** 改名 / 备注 / 启停 / 绑定名 */
+  adminUpdateShard: (id: string, body: { name?: string; note?: string; isActive?: boolean; binding?: string }) =>
+    json<AdminShardsResponse>(`/api/admin/shards/${encodeURIComponent(id)}`, 'PATCH', body),
+  /** 从注册表里摘掉这个分片（**不动** D1 库里的数据） */
+  adminRemoveShard: (id: string) => json<AdminShardsResponse>(`/api/admin/shards/${encodeURIComponent(id)}`, 'DELETE'),
 
   /** 受邀人打开邀请链接：邀请信息（表格 / 视图 / 邀请人），无需登录 */
   invite: (token: string) => json<{ invite: InviteDetail }>(`/api/invites/${encodeURIComponent(token)}`, 'GET'),

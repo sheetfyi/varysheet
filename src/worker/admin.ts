@@ -14,6 +14,7 @@
 import { hashPassword, validatePasswordStrength, verifyPassword } from './auth';
 import { EMAIL_PATTERN, newId, sqlNullableNumber, sqlNumber, sqlString, type SqlRow } from './http';
 import { DEFAULT_ADMIN_EMAIL } from './settings';
+import { forEachShardSafe } from './shards';
 import type { AdminUser } from '../shared/types';
 import type { Env } from './types';
 
@@ -95,7 +96,14 @@ async function bootstrapAdmin(env: Env, email: string): Promise<void> {
 
 /* ------------------------------------------------------------ 用户列表查询 */
 
-function adminUserFromRow(row: SqlRow): AdminUser {
+/** 列表里每个用户的「活跃度」：表格数 / 被分享数在分片里，最近活跃时间在用户库。 */
+interface AdminUserCounts {
+  databaseCount: number;
+  sharedCount: number;
+  lastSeenAt: number | null;
+}
+
+function adminUserFromRow(row: SqlRow, counts?: AdminUserCounts): AdminUser {
   return {
     id: sqlString(row, 'id'),
     email: sqlString(row, 'email'),
@@ -103,10 +111,87 @@ function adminUserFromRow(row: SqlRow): AdminUser {
     isAdmin: sqlNumber(row, 'is_admin') === 1,
     createdAt: sqlNumber(row, 'created_at'),
     updatedAt: sqlNumber(row, 'updated_at'),
-    databaseCount: sqlNumber(row, 'database_count'),
-    sharedCount: sqlNumber(row, 'shared_count'),
-    lastSeenAt: sqlNullableNumber(row, 'last_seen_at'),
+    databaseCount: counts?.databaseCount ?? 0,
+    sharedCount: counts?.sharedCount ?? 0,
+    lastSeenAt: counts?.lastSeenAt ?? null,
   };
+}
+
+function chunksOf<T>(items: T[], size: number): T[][] {
+  const slices: T[][] = [];
+  for (let index = 0; index < items.length; index += size) slices.push(items.slice(index, index + size));
+  return slices;
+}
+
+function inClause(count: number): string {
+  return Array.from({ length: count }, () => '?').join(', ');
+}
+
+/**
+ * 补上「这个用户有几张表 / 被分享了几张表 / 最近什么时候来过」。
+ *
+ * 存储拆分之后这些数据不在同一个库里：表格数与成员身份逐分片统计（某个分片不可用时
+ * 按 0 算，不拖垮整个用户列表），会话仍然在用户库。
+ */
+async function userActivityCounts(env: Env, ids: string[]): Promise<Map<string, AdminUserCounts>> {
+  const counts = new Map<string, AdminUserCounts>();
+  const unique = [...new Set(ids)];
+  for (const id of unique) counts.set(id, { databaseCount: 0, sharedCount: 0, lastSeenAt: null });
+  if (!unique.length) return counts;
+
+  const scans = await forEachShardSafe(env, async (_shard, db) => {
+    const owned = new Map<string, number>();
+    const shared = new Map<string, number>();
+    for (const slice of chunksOf(unique, DELETE_CHUNK)) {
+      const holes = inClause(slice.length);
+      const [ownedRows, sharedRows] = await Promise.all([
+        db
+          .prepare(
+            `SELECT owner_id AS user_id, COUNT(*) AS total FROM databases
+              WHERE owner_id IN (${holes}) GROUP BY owner_id`,
+          )
+          .bind(...slice)
+          .all<SqlRow>(),
+        db
+          .prepare(
+            `SELECT user_id, COUNT(*) AS total FROM database_members
+              WHERE user_id IN (${holes}) GROUP BY user_id`,
+          )
+          .bind(...slice)
+          .all<SqlRow>(),
+      ]);
+      for (const row of ownedRows.results ?? []) owned.set(sqlString(row, 'user_id'), sqlNumber(row, 'total'));
+      for (const row of sharedRows.results ?? []) shared.set(sqlString(row, 'user_id'), sqlNumber(row, 'total'));
+    }
+    return { owned, shared };
+  });
+
+  for (const scan of scans) {
+    if (!scan.value) continue;
+    for (const [id, total] of scan.value.owned) {
+      const entry = counts.get(id);
+      if (entry) entry.databaseCount += total;
+    }
+    for (const [id, total] of scan.value.shared) {
+      const entry = counts.get(id);
+      if (entry) entry.sharedCount += total;
+    }
+  }
+
+  for (const slice of chunksOf(unique, DELETE_CHUNK)) {
+    const { results } = await env.DB.prepare(
+      `SELECT user_id, MAX(last_seen_at) AS last_seen_at FROM sessions
+        WHERE user_id IN (${inClause(slice.length)}) GROUP BY user_id`,
+    )
+      .bind(...slice)
+      .all<SqlRow>();
+    for (const row of results ?? []) {
+      const entry = counts.get(sqlString(row, 'user_id'));
+      if (entry) entry.lastSeenAt = sqlNullableNumber(row, 'last_seen_at');
+    }
+  }
+
+  return counts;
 }
 
 /** 全部注册用户（可按昵称 / 邮箱搜索），管理员页面用。 */
@@ -127,10 +212,7 @@ export async function loadAdminUsers(
       .bind(...binds)
       .first<SqlRow>(),
     env.DB.prepare(
-      `SELECT u.id, u.email, u.name, u.is_admin, u.created_at, u.updated_at,
-              (SELECT COUNT(*) FROM databases d WHERE d.owner_id = u.id) AS database_count,
-              (SELECT COUNT(*) FROM database_members m WHERE m.user_id = u.id) AS shared_count,
-              (SELECT MAX(s.last_seen_at) FROM sessions s WHERE s.user_id = u.id) AS last_seen_at
+      `SELECT u.id, u.email, u.name, u.is_admin, u.created_at, u.updated_at
          FROM users u
          ${filter}
         ORDER BY u.created_at DESC
@@ -140,21 +222,25 @@ export async function loadAdminUsers(
       .all<SqlRow>(),
   ]);
 
-  return { users: (results ?? []).map(adminUserFromRow), total: sqlNumber(countRow ?? {}, 'total') };
+  const rows = results ?? [];
+  // 表格数 / 被分享数在分片里：用户行先出来，活跃度再补上
+  const counts = await userActivityCounts(env, rows.map((row) => sqlString(row, 'id')));
+  return {
+    users: rows.map((row) => adminUserFromRow(row, counts.get(sqlString(row, 'id')))),
+    total: sqlNumber(countRow ?? {}, 'total'),
+  };
 }
 
 /** 单个用户（`PATCH /api/admin/users/:id` 的响应）。 */
 export async function loadAdminUser(env: Env, userId: string): Promise<AdminUser | null> {
   const row = await env.DB.prepare(
-    `SELECT u.id, u.email, u.name, u.is_admin, u.created_at, u.updated_at,
-            (SELECT COUNT(*) FROM databases d WHERE d.owner_id = u.id) AS database_count,
-            (SELECT COUNT(*) FROM database_members m WHERE m.user_id = u.id) AS shared_count,
-            (SELECT MAX(s.last_seen_at) FROM sessions s WHERE s.user_id = u.id) AS last_seen_at
-       FROM users u WHERE u.id = ?`,
+    'SELECT id, email, name, is_admin, created_at, updated_at FROM users WHERE id = ?',
   )
     .bind(userId)
     .first<SqlRow>();
-  return row ? adminUserFromRow(row) : null;
+  if (!row) return null;
+  const counts = await userActivityCounts(env, [userId]);
+  return adminUserFromRow(row, counts.get(userId));
 }
 
 /* ------------------------------------------------------------ 删除注册账号 */
@@ -222,37 +308,60 @@ export async function deleteAdminUsers(
     }
 
     // 先记下这个账号的表格里上传过的文件，元数据删掉后就查不到了
-    const [fileRows, countRow] = await Promise.all([
-      env.DB.prepare(
-        `SELECT f.r2_key AS r2_key FROM files f JOIN databases d ON d.id = f.database_id WHERE d.owner_id = ?`,
-      )
-        .bind(id)
-        .all<SqlRow>(),
-      env.DB.prepare('SELECT COUNT(*) AS total FROM databases WHERE owner_id = ?').bind(id).first<SqlRow>(),
-    ]);
+    // 表格数据在分片里：先逐分片把要删的 R2 key / 表格数捞出来，再逐分片级联删除
+    const scans = await forEachShardSafe(env, async (_shard, db) => {
+      const [fileRows, countRow] = await Promise.all([
+        db
+          .prepare(
+            'SELECT f.r2_key AS r2_key FROM files f JOIN databases d ON d.id = f.database_id WHERE d.owner_id = ?',
+          )
+          .bind(id)
+          .all<SqlRow>(),
+        db.prepare('SELECT COUNT(*) AS total FROM databases WHERE owner_id = ?').bind(id).first<SqlRow>(),
+      ]);
 
+      await db.batch([
+        // 自己拥有的表格：记录 / 字段 / 视图 / 分享 / 备注 / 文件元数据由外键级联清理
+        db.prepare('DELETE FROM databases WHERE owner_id = ?').bind(id),
+        // 在别人表格里的身份：成员 / 定向分享 / 「限制编辑」记录 / 还没接受的邀请
+        db.prepare('DELETE FROM database_members WHERE user_id = ?').bind(id),
+        db.prepare('DELETE FROM view_shares WHERE user_id = ?').bind(id),
+        db.prepare('DELETE FROM cell_edits WHERE editor_key = ?').bind(`user:${id}`),
+        db.prepare('DELETE FROM invites WHERE email = ? AND accepted_at IS NULL').bind(email),
+      ]);
+
+      return {
+        keys: (fileRows.results ?? []).map((item) => sqlString(item, 'r2_key')).filter(Boolean),
+        databases: sqlNumber(countRow ?? {}, 'total'),
+      };
+    });
+
+    // 有分片没删成功就先不动账号本身：下次重试还能把剩下的数据清干净
+    const failed = scans.filter((scan) => scan.error);
+    if (failed.length) {
+      result.skipped.push({
+        id,
+        email,
+        reason: `有 ${failed.length} 个表格分片不可用，未能清理该账号的表格数据，请稍后重试`,
+      });
+      continue;
+    }
+
+    // 账号本体 / 会话 / 私信在用户库
     await env.DB.batch([
-      // 自己拥有的表格：记录 / 字段 / 视图 / 分享 / 备注 / 文件元数据由外键级联清理
-      env.DB.prepare('DELETE FROM databases WHERE owner_id = ?').bind(id),
-      // 在别人表格里的身份：成员 / 定向分享 / 会话 / 私信 / 「限制编辑」记录
-      env.DB.prepare('DELETE FROM database_members WHERE user_id = ?').bind(id),
-      env.DB.prepare('DELETE FROM view_shares WHERE user_id = ?').bind(id),
       env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(id),
       env.DB.prepare('DELETE FROM note_mentions WHERE user_id = ?').bind(id),
-      env.DB.prepare('DELETE FROM cell_edits WHERE editor_key = ?').bind(`user:${id}`),
-      // 还没接受的邀请：邮箱已经腾出来，旧邀请链接不该还能注册
-      env.DB.prepare('DELETE FROM invites WHERE email = ? AND accepted_at IS NULL').bind(email),
       env.DB.prepare('DELETE FROM users WHERE id = ?').bind(id),
     ]);
 
     // 最后把 R2 里的上传文件删掉（删不掉也不影响账号已经被删除）
-    const keys = (fileRows.results ?? []).map((item) => sqlString(item, 'r2_key')).filter(Boolean);
+    const keys = scans.flatMap((scan) => scan.value?.keys ?? []);
     for (let index = 0; index < keys.length; index += DELETE_CHUNK) {
       await env.BUCKET.delete(keys.slice(index, index + DELETE_CHUNK));
     }
 
     result.deleted.push({ id, email, name });
-    result.databaseCount += sqlNumber(countRow ?? {}, 'total');
+    result.databaseCount += scans.reduce((sum, scan) => sum + (scan.value?.databases ?? 0), 0);
   }
 
   return result;

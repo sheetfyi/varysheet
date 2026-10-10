@@ -107,29 +107,36 @@ export function capacityFromUsage(usage: DatabaseUsage, limits: CapacityLimits):
   };
 }
 
-/** 单表用量的独立查询（表格详情页只关心这一张表） */
-export async function loadDatabaseUsage(env: Env, databaseId: string): Promise<DatabaseUsage> {
-  const row = await env.DB.prepare(`SELECT ${DATABASE_USAGE_SELECT} FROM databases d WHERE d.id = ?`)
+/**
+ * 单表用量的独立查询（表格详情页只关心这一张表）。
+ * `db` 是这张表所在的分片库：`records` / `files` 都在分片里，和 `databases` 同库。
+ */
+export async function loadDatabaseUsage(db: D1Database, databaseId: string): Promise<DatabaseUsage> {
+  const row = await db.prepare(`SELECT ${DATABASE_USAGE_SELECT} FROM databases d WHERE d.id = ?`)
     .bind(databaseId)
     .first<SqlRow>();
   return usageFromRow(row ?? {});
 }
 
 /** 单表类型（容量 / 列数 / 视图数上限都按它取；查不到就按基础表格） */
-export async function loadDatabaseKind(env: Env, databaseId: string): Promise<TableKind> {
-  const row = await env.DB.prepare('SELECT kind FROM databases WHERE id = ?').bind(databaseId).first<SqlRow>();
+export async function loadDatabaseKind(db: D1Database, databaseId: string): Promise<TableKind> {
+  const row = await db.prepare('SELECT kind FROM databases WHERE id = ?').bind(databaseId).first<SqlRow>();
   return asTableKind(row ? sqlString(row, 'kind', 'basic') : 'basic');
 }
 
-/** 单表容量快照（调用方已经查过类型时直接传进来，少一次往返） */
+/**
+ * 单表容量快照（调用方已经查过类型时直接传进来，少一次往返）。
+ * `env` 只用来读上限的环境变量，库还是要传入分片 `db`。
+ */
 export async function loadDatabaseCapacity(
   env: Env,
+  db: D1Database,
   databaseId: string,
   kind?: TableKind,
 ): Promise<DatabaseCapacity> {
   const [usage, resolved] = await Promise.all([
-    loadDatabaseUsage(env, databaseId),
-    kind ? Promise.resolve(kind) : loadDatabaseKind(env, databaseId),
+    loadDatabaseUsage(db, databaseId),
+    kind ? Promise.resolve(kind) : loadDatabaseKind(db, databaseId),
   ]);
   return capacityFromUsage(usage, capacityLimits(env, resolved));
 }
@@ -145,14 +152,15 @@ export async function loadDatabaseCapacity(
  */
 export async function assertDatabaseCanGrow(
   env: Env,
+  db: D1Database,
   databaseId: string,
   growth: { rows?: number; bytes?: number } = {},
 ): Promise<void> {
-  const limits = capacityLimits(env, await loadDatabaseKind(env, databaseId));
+  const limits = capacityLimits(env, await loadDatabaseKind(db, databaseId));
   // 专业表格不限容量：直接放行，连用量都不用查
   if (limits.unlimited) return;
   const label = tableKindMeta(limits.kind).label;
-  const capacity = capacityFromUsage(await loadDatabaseUsage(env, databaseId), limits);
+  const capacity = capacityFromUsage(await loadDatabaseUsage(db, databaseId), limits);
   const rows = Math.max(0, Math.floor(growth.rows ?? 0));
   const bytes = Math.max(0, Math.floor(growth.bytes ?? 0));
 

@@ -1,8 +1,28 @@
-/** Worker environment bindings (see wrangler.jsonc). */
+/**
+ * Worker environment bindings (see wrangler.jsonc).
+ *
+ * 存储拆成了「用户库 + 若干表格分片库」（见 src/worker/shards.ts）：
+ *   DB                 用户库：账号 / 会话 / 站点设置 / 购买记录 / @提醒 / 分片注册表
+ *   DB_TABLES_BASIC    表格分片（基础表格），绑定式访问，最快
+ *   DB_TABLES_PRO      表格分片（专业表格），绑定式访问，最快
+ * 管理员在后台**动态新建**的备用分片没法加绑定，改用 Cloudflare D1 HTTP 接口访问，
+ * 需要下面两个 secret：
+ *   CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN（Account > D1 > Edit 权限）
+ */
 export interface Env {
   DB: D1Database;
+  /** 基础表格主分片（可选：没绑定就只用注册表里登记的分片） */
+  DB_TABLES_BASIC?: D1Database;
+  /** 专业表格主分片（可选） */
+  DB_TABLES_PRO?: D1Database;
   BUCKET: R2Bucket;
   ASSETS: Fetcher;
+  /** Cloudflare 账号 ID（管理员后台新建 / 挂载备用分片时用） */
+  CLOUDFLARE_ACCOUNT_ID?: string;
+  /** Cloudflare API Token（需要 Account > D1 > Edit 权限） */
+  CLOUDFLARE_API_TOKEN?: string;
+  /** Cloudflare API 基址，默认 https://api.cloudflare.com/client/v4（本地调试可覆盖） */
+  D1_API_BASE?: string;
   /** 站点名称（品牌）的兜底值；管理员可在「后台 → 站点设置」里覆盖（存在 D1 settings 表） */
   APP_NAME?: string;
   MAX_UPLOAD_MB?: string;
@@ -52,6 +72,14 @@ export interface RequestContext {
   url: URL;
   params: Record<string, string>;
   user: AuthedUser | null;
+  /**
+   * 本次请求涉及的表格分片库（表格 / 字段 / 记录 / 视图 / 分享 / 备注 / 附件都在这里）。
+   *
+   * 由访问检查（`requireDatabaseAccess` / `accessForXxx`）顺手填好：一张表格的所有数据
+   * 都在同一个分片里，所以做完一次访问检查之后，路由里统一用 `tableDb(ctx)` 读到底，
+   * 不用每次都去猜「这条数据在哪个库」。没有先做访问检查就调用 `tableDb(ctx)` 会抛 500。
+   */
+  db?: D1Database;
 }
 
 export type RouteHandler = (ctx: RequestContext) => Promise<Response> | Response;

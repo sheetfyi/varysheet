@@ -8,7 +8,10 @@
 # 需要的仓库 Secrets（Settings -> Secrets and variables -> Actions -> New repository secret）
 #   CLOUDFLARE_API_TOKEN   必需。Cloudflare API 令牌
 #   CLOUDFLARE_ACCOUNT_ID  必需。Cloudflare 账户 ID
-#   D1_DATABASE_ID         可选。提供后会替换 wrangler.jsonc 里的占位 database_id
+#   D1_DATABASE_ID         可选。提供后会替换 wrangler.jsonc 里用户库（DB）的占位 database_id
+#   D1_TABLES_BASIC_ID     可选。基础表格分片库（DB_TABLES_BASIC）的 database_id
+#   D1_TABLES_PRO_ID       可选。专业表格分片库（DB_TABLES_PRO）的 database_id
+#                          （两个分片库没配时，部署步骤会尝试 `wrangler d1 create` 现建一个）
 #   RESEND_API_KEY         可选。Resend 发信密钥（注册确认码 / 重置密码通知邮件）
 #   RESEND_FROM_EMAIL      可选。发件人，默认 Varysheet <admin@varysheet.com>
 #   ADMIN_EMAIL            可选。超级管理员邮箱，登录时自动创建 / 提升该账号
@@ -68,6 +71,9 @@ jobs:
 
       - name: 路由自检
         run: npm run check:routes
+
+      - name: 校验分片建表脚本与迁移文件是否同步
+        run: npm run schema:check
 
       - name: 构建前端
         run: npm run build:client
@@ -206,6 +212,69 @@ jobs:
             exit 1
           fi
 
+      # 存储拆分之后表格数据在独立的分片库里（见 docs/storage.md）：用户库之外的
+      # 两个主分片也要有真实的 database_id，否则 `wrangler deploy` 会因为绑定指向
+      # 不存在的库而失败（错误码 10181）。
+      - name: 配置表格分片库（DB_TABLES_BASIC / DB_TABLES_PRO）
+        if: steps.creds.outputs.ready == 'true'
+        env:
+          D1_TABLES_BASIC_ID: ${{ secrets.D1_TABLES_BASIC_ID }}
+          D1_TABLES_PRO_ID: ${{ secrets.D1_TABLES_PRO_ID }}
+        run: |
+          set -euo pipefail
+
+          # 提供了 Secret 就用它替换 wrangler.jsonc 里的占位 id
+          replace_placeholder() {
+            local placeholder="$1" secret="$2" label="$3"
+            if [ -z "$secret" ]; then
+              echo "未提供 ${label}：沿用 wrangler.jsonc 里的现有值"
+              return 0
+            fi
+            if [[ ! "$secret" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+              echo "::error title=${label} 格式错误::应为 8-4-4-4-12 形式的 UUID（见 DEPLOY.md 6.2）"
+              exit 1
+            fi
+            sed -i "s/${placeholder}/${secret}/" wrangler.jsonc
+            echo "已用 Secrets.${label} 替换占位 id"
+          }
+
+          replace_placeholder 11111111-1111-4111-8111-111111111111 "${D1_TABLES_BASIC_ID:-}" D1_TABLES_BASIC_ID
+          replace_placeholder 22222222-2222-4222-8222-222222222222 "${D1_TABLES_PRO_ID:-}" D1_TABLES_PRO_ID
+
+          # 还是占位 id 的话现建一个（幂等：已存在就沿用，并把真实 id 写回 wrangler.jsonc）
+          create_shard() {
+            local name="$1" placeholder="$2"
+            grep -q "$placeholder" wrangler.jsonc || return 0
+            if ! npx wrangler d1 create "$name" > /tmp/d1.log 2>&1; then
+              if grep -qi 'already exists' /tmp/d1.log; then
+                echo "::error title=分片库已存在但没配 id::${name} 已经存在，请把它的真实 database_id 配成 Secrets（${name} 对应 D1_TABLES_*_ID，见 DEPLOY.md 6.2）"
+              else
+                echo "::error title=分片库创建失败::${name} 创建失败（需要 Account > D1 > Edit 权限，见 DEPLOY.md 6.1）"
+              fi
+              cat /tmp/d1.log
+              exit 1
+            fi
+            local id=""
+            # 优先用 `d1 list --json` 按库名精确取（输出格式最稳定）
+            if npx wrangler d1 list --json > /tmp/d1-list.json 2>/dev/null; then
+              id="$(node -e "const fs=require('fs');const rows=JSON.parse(fs.readFileSync('/tmp/d1-list.json','utf8'));const row=rows.find((item)=>item.name===process.argv[1]);process.stdout.write(row?.uuid??'');" "$name")"
+            fi
+            # 兜底：从 `d1 create` 的输出里读（toml / json 两种排版都认）
+            if [ -z "$id" ]; then
+              id="$(grep -Eo 'database_id"?[^0-9a-fA-F]*[0-9a-fA-F-]{36}' /tmp/d1.log | tail -n 1 | grep -Eo '[0-9a-fA-F-]{36}')"
+            fi
+            if [ -z "$id" ]; then
+              echo "::error title=分片库 id 解析失败::${name} 创建成功，但没能从输出里读出 database_id，请手工回填 wrangler.jsonc"
+              cat /tmp/d1.log
+              exit 1
+            fi
+            sed -i "s/${placeholder}/${id}/" wrangler.jsonc
+            echo "已创建并挂上分片库 ${name}（${id}）"
+          }
+
+          create_shard cloudnotion-tables-basic 11111111-1111-4111-8111-111111111111
+          create_shard cloudnotion-tables-pro 22222222-2222-4222-8222-222222222222
+
       - name: 确保 R2 存储桶存在
         if: steps.creds.outputs.ready == 'true'
         run: |
@@ -226,6 +295,8 @@ jobs:
           fi
           exit 1
 
+      # 两个迁移目录各自独立：migrations/control 作用于用户库（cloudnotion-db），
+      # migrations/tables 作用于每个分片库（cloudnotion-tables-basic / -pro）。
       - name: 应用远程 D1 迁移
         if: steps.creds.outputs.ready == 'true' && inputs.skip_migrations != 'true'
         run: |
@@ -236,9 +307,9 @@ jobs:
           if grep -qE 'Authentication error|10000|9109|Unauthorized|401|403' /tmp/migrate.log; then
             echo "::error title=D1 权限不足::当前 CLOUDFLARE_API_TOKEN 缺少 Account > D1 > Edit 权限，wrangler 连 D1 API 都会 401。请在 Cloudflare 控制台编辑该 Token 补上 D1 Edit 后重跑（见 DEPLOY.md 6.1）"
           elif grep -qE 'not found|does not exist|7500' /tmp/migrate.log; then
-            echo "::error title=D1 数据库不存在::wrangler.jsonc 的 database_id（或 Secrets.D1_DATABASE_ID）不是本账户下的真实 id，见 DEPLOY.md 6.2"
+            echo "::error title=D1 数据库不存在::wrangler.jsonc 的 database_id（用户库 / 分片库）不是本账户下的真实 id，见 DEPLOY.md 6.2"
           else
-            echo "::error title=D1 迁移失败::详见上方日志"
+            echo "::error title=D1 迁移失败::详见上方日志（用户库看 migrations/control，分片库看 migrations/tables）"
           fi
           exit 1
 

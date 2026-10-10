@@ -9,13 +9,15 @@
 
 ## 1. 创建 D1 数据库并回填 `database_id`
 
-`wrangler.jsonc` 中默认是占位值 `00000000-0000-0000-0000-000000000000`（本地 `--local` 开发可用，部署时**必须**替换）：
+存储拆成了「用户库 + 表格分片库」（见 [docs/storage.md](docs/storage.md)），所以需要**三个** D1 库：
 
 ```bash
-npx wrangler d1 create cloudnotion-db
+npx wrangler d1 create cloudnotion-db             # 用户库（DB）
+npx wrangler d1 create cloudnotion-tables-basic   # 基础表格分片（DB_TABLES_BASIC）
+npx wrangler d1 create cloudnotion-tables-pro     # 专业表格分片（DB_TABLES_PRO）
 ```
 
-命令会打印类似：
+每条命令都会打印类似：
 
 ```
 [[d1_databases]]
@@ -24,7 +26,12 @@ database_name = "cloudnotion-db"
 database_id = "1234abcd-....-........"   # 复制这一行
 ```
 
-把 `database_id` 填回 `wrangler.jsonc` 的 `d1_databases[0].database_id`。
+把三个 `database_id` 分别填回 `wrangler.jsonc` 的 `d1_databases[0..2].database_id`
+（`wrangler.jsonc` 里默认是占位值 `00000000-...` / `1111...` / `2222...`：本地 `--local`
+开发可以用占位值，部署时**必须**替换）。
+
+> 表格分片可以按需再加：库快满（默认 85%）时在后台「存储分片」里新建或挂载，
+> 见 docs/storage.md 的「后台存储分片」一节；新加的分片不需要改 `wrangler.jsonc`。
 
 ## 2. 创建 R2 桶
 
@@ -37,14 +44,22 @@ npx wrangler r2 bucket create cloudnotion-files
 ## 3. 应用迁移
 
 ```bash
-npm run db:migrate:remote      # wrangler d1 migrations apply cloudnotion-db --remote
+npm run db:migrate:remote      # 用户库 + 两个分片库各跑一遍（control / tables 两个目录）
 ```
 
-本地开发用 `npm run db:migrate:local`。`CREATE TABLE IF NOT EXISTS` 部分是幂等的，
-但 `ALTER TABLE ... ADD COLUMN`（如 `0002_view_shares.sql`、`0003_property_locks.sql`）
-不可重复执行，交给 `wrangler d1 migrations` 的版本表记录即可；新增迁移按
-`migrations/0003_xxx.sql` 命名就会被自动识别，`deploy.yml` 在部署前会自动执行
-`npm run db:migrate:remote`。
+本地开发用 `npm run db:migrate:local`（同样是三个库一起）。两个迁移目录各自独立：
+
+- `migrations/control` → 用户库（账号 / 会话 / 设置 / 分片注册表）；
+- `migrations/tables` → 每个分片库（表格数据；文件由 `scripts/sync-shard-schema.mjs` 生成）。
+
+`CREATE TABLE IF NOT EXISTS` 部分是幂等的，但 `ALTER TABLE ... ADD COLUMN`（如
+`0002_view_shares.sql`、`0003_property_locks.sql`）不可重复执行，交给 `wrangler d1 migrations`
+的版本表记录即可；新增迁移在对应目录里按 `00xx_xxx.sql` 命名就会被自动识别，
+`deploy.yml` 在部署前会自动执行 `npm run db:migrate:remote`。
+
+> **从旧版本升级（数据还都在一个库里）**：先 `node scripts/migrate-split-data.mjs --remote`
+> 把表格数据搬到分片库并核对行数（本地先 `--dry-run` 看数量），确认通过后再跑迁移 ——
+> `0012_split_table_storage.sql` 会 DROP 掉用户库里的旧表。完整步骤见 [docs/storage.md](docs/storage.md)。
 
 ## 4. 构建并部署
 
@@ -120,9 +135,9 @@ npm run check:routes
 
 | 阶段 | Job | 内容 |
 | --- | --- | --- |
-| 1 | `verify` | `npm ci` → `npm run typecheck`（client + worker）→ `npm run check:routes` → `vite build` |
-| 2 | `e2e` | 本地 D1 迁移 → 后台启动 `wrangler dev --local` → 运行 `scripts/smoke-test.mjs`（断言数见运行日志 / Step Summary） |
-| 3 | `deploy` | 校验 D1 id → 确保 R2 桶 → `npm run db:migrate:remote` → `vite build` → `wrangler deploy` → 对线上地址再跑一遍完整冒烟测试 |
+| 1 | `verify` | `npm ci` → `npm run typecheck`（client + worker）→ `npm run check:routes` → `npm run schema:check`（分片 DDL 与迁移文件是否同步）→ `vite build` |
+| 2 | `e2e` | 本地 D1 迁移（用户库 + 两个分片库） → 后台启动 `wrangler dev --local` → 运行 `scripts/smoke-test.mjs`（断言数见运行日志 / Step Summary） |
+| 3 | `deploy` | 校验 D1 id（用户库 + 两个分片库，缺分片库时现建） → 确保 R2 桶 → `npm run db:migrate:remote` → `vite build` → `wrangler deploy` → 对线上地址再跑一遍完整冒烟测试 |
 
 ### 6.1 一次性配置 Secrets
 
@@ -132,7 +147,9 @@ npm run check:routes
 | --- | --- | --- |
 | `CLOUDFLARE_API_TOKEN` | ✅ | Cloudflare API 令牌，权限见下 |
 | `CLOUDFLARE_ACCOUNT_ID` | ✅ | `npx wrangler whoami` 里的 Account ID |
-| `D1_DATABASE_ID` | ➖ | 可选。填了就不必把真实 id 提交进 `wrangler.jsonc`，工作流会自动替换占位符 |
+| `D1_DATABASE_ID` | ➖ | 可选。用户库的 id；填了就不必把真实 id 提交进 `wrangler.jsonc`，工作流会自动替换占位符 |
+| `D1_TABLES_BASIC_ID` | ➖ | 可选。基础表格分片库（`cloudnotion-tables-basic`）的 id；不填则工作流尝试现建一个 |
+| `D1_TABLES_PRO_ID` | ➖ | 可选。专业表格分片库（`cloudnotion-tables-pro`）的 id；同上 |
 | `RESEND_API_KEY` | ➖ | Resend 发信密钥（注册确认码、重置密码通知）。不配则确认码回显，仅适合测试 |
 | `RESEND_FROM_EMAIL` | ➖ | 发件人，默认 `Varysheet <admin@varysheet.com>` |
 | `ADMIN_EMAIL` | ➖ | 超级管理员邮箱，登录时自动创建 / 提升该账号；默认 `admin@varysheet.com` |
@@ -159,15 +176,25 @@ npm run check:routes
 
 ### 6.2 首次部署前必须做的一步
 
-`wrangler.jsonc` 的 `database_id` 还是占位符、或填的是**别的账户**下的 id 时，流水线会在 `deploy` 阶段以清晰错误停下（`10181 ... which was not found`）。二选一：
+`wrangler.jsonc` 里三个 D1 库的 `database_id` 还是占位符、或填的是**别的账户**下的 id 时，
+流水线会在 `deploy` 阶段以清晰错误停下（`10181 ... which was not found`）。二选一：
 
 ```bash
 # 方案 A：本地创建后回填 wrangler.jsonc 并提交
 npx wrangler d1 create cloudnotion-db
-# 方案 B：不改代码，把 id 存成 GitHub Secret：D1_DATABASE_ID
+npx wrangler d1 create cloudnotion-tables-basic
+npx wrangler d1 create cloudnotion-tables-pro
+# 方案 B：不改代码，把 id 存成 GitHub Secret：
+#   D1_DATABASE_ID（用户库）、D1_TABLES_BASIC_ID、D1_TABLES_PRO_ID（两个主分片）
 ```
 
-也可以在 Cloudflare 控制台 **Storage & Databases → D1 SQL Database → Create** 建库（数据库名必须填 `cloudnotion-db`，工作流是按这个名字执行迁移的），再把列表里的 **Database ID** 回填到 `wrangler.jsonc` 的 `database_id`，或存成 `D1_DATABASE_ID` Secret（工作流会校验其 UUID 格式）。
+也可以在 Cloudflare 控制台 **Storage & Databases → D1 SQL Database → Create** 建库
+（数据库名必须填 `cloudnotion-db` / `cloudnotion-tables-basic` / `cloudnotion-tables-pro`，
+工作流是按这些名字建库和执行迁移的），再把列表里的 **Database ID** 回填到 `wrangler.jsonc`
+的 `database_id`，或存成上面三个 Secret（工作流会校验 UUID 格式）。
+
+两个分片库没配 Secret 时，工作流会尝试 `wrangler d1 create` 现建一个，并把返回的 id 写进
+`wrangler.jsonc`；已经存在同名库但 `wrangler.jsonc` 里还是占位 id 时会停下来提示你补配 Secret。
 
 R2 桶无需手动建，工作流会执行 `wrangler r2 bucket create cloudnotion-files`（已存在则跳过）。
 
@@ -244,8 +271,11 @@ npm run dev
 
 | 现象 | 处理 |
 | --- | --- |
-| 部署报 `database_id` 无效 | 第 1 步未替换占位符，或换账号后 id 失效 |
-| `no such table` | 未执行远程迁移：`npm run db:migrate:remote` |
+| 部署报 `database_id` 无效 | 第 1 步未替换占位符，或换账号后 id 失效（现在有三个库：用户库 + 两个分片库） |
+| `no such table` | 未执行远程迁移：`npm run db:migrate:remote`（用户库与分片库各跑一遍） |
+| `no such table: main.notes`（新增 @提醒 / 删账号时） | 用户库里的 `note_mentions` 还带着指向 `notes` 的旧外键：跑一遍迁移（`0013_note_mentions_rebuild.sql`）重建这张表 |
+| 表格突然打不开 / 后台提示分片不可用 | 分片库被删或绑定缺失：在后台「存储分片」看状态（启用 / 停用 / 用量），或检查 `wrangler.jsonc` 的 `DB_TABLES_*` 绑定 |
+| 分片快满了（后台显示「接近上限」） | 在后台「存储分片」新建一个同类型分片（需要 `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_API_TOKEN`），新表格会自动分流过去 |
 | 上传报错 / 404 | R2 桶未创建或 `bucket_name` 不一致 |
 | `near "values": syntax error` | SQL 中把 `values` 当作列名未加引号；本仓库已统一写成 `"values"` |
 | 前端 404 / 空白 | 忘记 `vite build`：`npm run deploy` 会自动构建，勿只跑 `wrangler deploy` |
@@ -257,6 +287,11 @@ npm run dev
 ## 8. 数据备份
 
 ```bash
-# 导出线上库（SQL 文本）
-npx wrangler d1 export cloudnotion-db --remote --output backup.sql
+# 导出线上库（SQL 文本）：用户库 + 每个表格分片库
+npx wrangler d1 export cloudnotion-db --remote --output backup-user.sql
+npx wrangler d1 export cloudnotion-tables-basic --remote --output backup-tables-basic.sql
+npx wrangler d1 export cloudnotion-tables-pro --remote --output backup-tables-pro.sql
 ```
+
+后台新建的备用分片（后台「存储分片」里挂载的库）也要各自导出：库名与 `database_id`
+在后台那一页的列表里能看到。
