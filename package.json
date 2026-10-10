@@ -20,8 +20,10 @@
     "schema:sync": "node scripts/sync-shard-schema.mjs",
     "schema:check": "node scripts/sync-shard-schema.mjs --check",
     "db:split": "node scripts/migrate-split-data.mjs",
+    "db:sync-ids": "node scripts/sync-d1-ids.mjs",
     "typecheck": "tsc -p tsconfig.client.json --noEmit && tsc -p tsconfig.worker.json --noEmit",
     "check:routes": "node scripts/check-routes.mjs",
+    "check:scripts": "node --check scripts/sync-d1-ids.mjs && node --check scripts/sync-shard-schema.mjs && node --check scripts/migrate-split-data.mjs && node --check scripts/check-routes.mjs && node --check scripts/smoke-test.mjs",
     "cf-typegen": "wrangler types",
     "test:e2e": "node scripts/smoke-test.mjs"
   },

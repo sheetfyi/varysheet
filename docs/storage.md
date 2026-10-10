@@ -97,3 +97,16 @@ npx wrangler secret put CLOUDFLARE_API_TOKEN   # 需要 Account > D1 > Edit
 
 没配这两个 secret 时列表仍然可用（数据来自注册表 / 绑定），另外三个操作会返回 501
 并在后台页面给出配置提示。
+
+## 换账户 / 重建库后对齐 `database_id`
+
+`database_id` 会随账户变，**库名不会变**，所以换 Cloudflare 账户或重建 D1 库之后，用
+`scripts/sync-d1-ids.mjs` 按库名把 `wrangler.jsonc` 对齐就行（CI 的 `deploy` job 跑的就是它）：
+
+```bash
+node scripts/sync-d1-ids.mjs --create    # 按库名对齐；本账户里没有就现建（= npm run db:sync-ids -- --create）
+node scripts/sync-d1-ids.mjs --check     # 只检查差异、不写文件
+```
+
+迁移目录不用跟着改：用户库永远是 `migrations/control`，分片库永远是 `migrations/tables`，
+换库之后 `npm run db:migrate:remote` 会在新库上把这两个目录重放一遍。

@@ -76,6 +76,7 @@ scripts/
   smoke-test.mjs    端到端冒烟测试（失败时退出码 1）
   sync-shard-schema.mjs  从 src/worker/shardSchema.ts 生成 migrations/tables/0001_init.sql 与用户库的拆分迁移
   migrate-split-data.mjs 把老部署里用户库中的表格数据搬进分片库并核对行数（`npm run db:split`）
+  sync-d1-ids.mjs    按库名把 wrangler.jsonc 里三个 D1 库的 database_id 对齐到当前账户（`npm run db:sync-ids`；换账户后用它修 id）
 tools/
   mobile-check/nocookie-login.mjs  本地诊断：用「丢掉 Set-Cookie」的反向代理模拟手机浏览器，验证登录后不会被打回登录页
   online-smoke-proxy.mjs           国内网络下让 Node 的 fetch 走系统代理，跑线上冒烟测试
@@ -109,7 +110,9 @@ npm run dev
 - `npm run dev:web`：只跑 Vite 前端（`/api` 需代理到 Worker，见 `vite.config.ts`）
 - `npm run typecheck`：`tsconfig.client.json` + `tsconfig.worker.json` 全量类型检查
 - `npm run check:routes`：路由自检（含 `/api/admin/shards*`）
+- `npm run check:scripts`：`scripts/*.mjs` 语法自检
 - `npm run schema:check`：分片建表脚本（`src/worker/shardSchema.ts`）与迁移文件是否同步
+- `npm run db:sync-ids`：按**库名**把 `wrangler.jsonc` 里三个 D1 库的 `database_id` 对齐到当前账户（换账户 / 重建库后跑它，缺库加 `--create` 现建；只检查加 `--check`）
 - `npm run db:split`：**老部署升级时**把用户库里的表格数据搬进分片库并核对（等价于 `node scripts/migrate-split-data.mjs`；先加 `--dry-run` 看数量，线上加 `--remote`）
 - `npm run test:e2e`：对运行中的 Worker 跑端到端冒烟测试
 - `.dev.vars`：本地机密（`RESEND_API_KEY`、`ADMIN_EMAIL` / `ADMIN_PASSWORD`），已在 `.gitignore` 里；
@@ -226,9 +229,9 @@ GET    /api/health
 `.github/workflows/deploy.yml`：**push 到 `main` 自动部署**，PR 只做校验（不会部署）。
 
 ```
-verify   npm ci -> npm run typecheck -> npm run check:routes -> vite build
-e2e      本地 D1 迁移 -> 写临时 .dev.vars（测试管理员 + 回显白名单）-> wrangler dev --local -> scripts/smoke-test.mjs（242 项断言）
-deploy   校验 D1 id -> 确保 R2 桶 -> 远程 D1 迁移 -> vite build -> wrangler deploy -> 同步可选 Secrets（邮件 / 管理员）-> 线上冒烟测试（本地那套 242 项断言；线上用真实 ADMIN_EMAIL 时自动跳过 2 项「重置自己密码」断言 → 240/240）
+verify   npm ci -> npm run typecheck -> npm run check:routes -> npm run check:scripts -> npm run schema:check -> vite build
+e2e      本地 D1 迁移 -> 写临时 .dev.vars（测试管理员 + 回显白名单）-> wrangler dev --local -> scripts/smoke-test.mjs（断言数见运行日志 / Step Summary）
+deploy   node scripts/sync-d1-ids.mjs --create（按库名对齐三个 D1 库的 id，缺了就现建）-> 确保 R2 桶 -> 远程 D1 迁移 -> vite build -> wrangler deploy -> 同步可选 Secrets（邮件 / 管理员）-> 线上冒烟测试（同一套断言；线上配了真实 ADMIN_EMAIL 时自动跳过 2 项「重置自己密码」断言）
 ```
 
 只需在仓库 `Settings → Secrets and variables → Actions` 配置：
@@ -237,7 +240,8 @@ deploy   校验 D1 id -> 确保 R2 桶 -> 远程 D1 迁移 -> vite build -> wran
 | --- | --- | --- |
 | `CLOUDFLARE_API_TOKEN` | ✅ | API 令牌（Workers Scripts / D1 / R2 编辑权限） |
 | `CLOUDFLARE_ACCOUNT_ID` | ✅ | Cloudflare 账户 ID |
-| `D1_DATABASE_ID` | ➖ | 可选，填了会自动替换 `wrangler.jsonc` 中的占位 `database_id` |
+| `D1_DATABASE_ID` | ➖ | 可选，用户库（`DB`）的 id；不填则按库名在本账户里查（`node scripts/sync-d1-ids.mjs --create`） |
+| `D1_TABLES_BASIC_ID` / `D1_TABLES_PRO_ID` | ➖ | 可选，两个主分片库（`cloudnotion-tables-basic` / `-pro`）的 id；不填同上，账户里查不到才会现建 |
 | `RESEND_API_KEY` | ➖ | Resend 发信密钥（注册确认码 / 重置密码通知）。不配时确认码直接回显为 `devCode`，只适合测试域 |
 | `RESEND_FROM_EMAIL` | ➖ | 发件人，默认 `Varysheet <admin@varysheet.com>` |
 | `ADMIN_EMAIL` | ➖ | 超级管理员邮箱：首次登录（或 `GET /api/session`）自动创建 / 提升该账号；默认 `admin@varysheet.com` |
