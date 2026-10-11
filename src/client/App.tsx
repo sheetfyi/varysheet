@@ -576,6 +576,12 @@ export function App() {
               {sidebarOpen ? '«' : '☰'}
             </button>
             <SiteMark appName={appName} siteIconUrl={siteIconUrl} className="brand" />
+            {/* 侧边栏收起时看不到底部的用户信息，这里把登录用户昵称补在站点名与收件箱之间 */}
+            {!sidebarOpen ? (
+              <span className="small muted app-bar-user" title={user.email || user.name || ''}>
+                {user.name || user.email}
+              </span>
+            ) : null}
             {/* 侧边栏收起时，收件箱标志挪到顶部条（看不到侧边栏左上角的那个） */}
             {!sidebarOpen ? (
               <InboxButton

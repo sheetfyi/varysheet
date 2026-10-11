@@ -465,14 +465,9 @@ function QuotaDialog({
       {/* 价格明细：`9.9 元/月 × 2 个 × 12 个月 = 237.6 元` */}
       <p className="quota-price">价格：{purchasePriceText(kind, count, months)}</p>
 
+      {/* 一句话收尾：买完的效果 + 支付口径（细则都在上面的规则列表里，不再重复） */}
       <p className="small muted">
-        选中的是「{meta.label}」：买几个就多几个可添加的{meta.label}名额（{tableKindCapacityText(kind)}）。
-        支付还没接入，点「购买」会立刻加名额并记一条购买流水。
-      </p>
-      {/* 名额来源提示：基础表格与专业表格都只能购买（分享不加，口径见 shared/quota.ts） */}
-      <p className="small muted">
-        基础表格与专业表格都没有赠送名额（分享也不增加），只能购买：买几个就多几个可添加的
-        {meta.label}。
+        买几个就多几个可添加的{meta.label}名额（{tableKindCapacityText(kind)}）；点「购买」立即生效并记一条流水，支付尚未接入。
       </p>
       {error ? <p className="error small">{error}</p> : null}
     </Modal>
@@ -481,7 +476,7 @@ function QuotaDialog({
 
 /**
  * 「你有 N 个表格可」里那个可点的数字：N 是**试用 / 基础 / 专业三类名额的合计**，
- * 点开都是同一个「表格数量说明」弹窗（弹窗里再按类型给出各自的「已添加 / 共几个 / 还剩几个」）。
+ * 点开都是同一个「表格数量说明」弹窗（弹窗里再按类型给出各自的「已用 x/y，还剩几个」）。
  * 只是一个可点的小按钮 + 一段无障碍说明，没有别的状态。
  */
 function QuotaCountButton({ remaining, onOpen }: { remaining: number; onOpen: () => void }) {

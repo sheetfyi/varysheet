@@ -38,13 +38,18 @@ export const MAX_PURCHASE_COUNT = 10;
 /** 名额用完时的错误码：建表接口 403 用它，前端据此把提示写成「去邀请新用户 / 去购买」 */
 export const QUOTA_EXCEEDED = 'quota_exceeded';
 
-/** 名额规则：侧边栏的说明弹窗原样展示，改口径时只改这里 */
+/**
+ * 名额规则：侧边栏的说明弹窗原样展示，改口径时只改这里。
+ *
+ * 文案要求「一行一条、能扫读」：每条只说一件事，容量 / 保留期这类细节交给下面的对比表，
+ * 这里不再重复（弹窗里的其它句子同理）。
+ */
 export const TABLE_QUOTA_RULES: string[] = [
-  '表格分三类：试用表格 / 基础表格 / 专业表格，三边的名额分开计算。',
-  `新注册账号送 ${BASE_TABLE_QUOTA.trial} 个试用表格（100 条记录 / 0.5GB 附件 / 数据保留半年）；每成功邀请一位新用户注册再 +${INVITE_TRIAL_TABLE_QUOTA} 个。试用表格不单卖。`,
-  `基础表格没有赠送名额（分享也不增加）：只能购买，${tableKindPriceText('basic')}，买几个就多几个可添加的基础表格。`,
-  `专业表格同样没有赠送名额（分享也不增加）：只能购买，${tableKindPriceText('pro')}，买几个就多几个可添加的专业表格。`,
-  `购买时按时长买：先选时长单位（「月」1 个月 / 「年」12 个月），再选时长数量（月 1 ~ 12 个、年 1 ~ 5 个），总时长 ${MIN_PURCHASE_MONTHS} ~ ${MAX_PURCHASE_MONTHS} 个月；金额 = 每月单价 × 购买数量 × 总月数。`,
+  '名额分三类独立计算：试用表格、基础表格、专业表格。',
+  `试用表格：注册送 ${BASE_TABLE_QUOTA.trial} 个，每邀请一位新用户注册 +${INVITE_TRIAL_TABLE_QUOTA} 个，不出售。`,
+  `基础表格：无赠送，只能购买，${tableKindPriceText('basic')}；分享不增加名额。`,
+  `专业表格：无赠送，只能购买，${tableKindPriceText('pro')}；分享不增加名额。`,
+  `购买时长 = 单位（月 1 个月 / 年 12 个月）× 数量（月 1 ~ 12，年 1 ~ 5），总时长 ${MIN_PURCHASE_MONTHS} ~ ${MAX_PURCHASE_MONTHS} 个月；金额 = 月单价 × 表格数量 × 总月数。`,
 ];
 
 function countOf(value: number | undefined): number {
@@ -89,9 +94,9 @@ export function quotaSetFromUsed(used: { trial: number; basic: number; pro: numb
   });
 }
 
-/** 说明弹窗里的一行现状：`基础表格：已添加 2 个 · 共 3 个名额 · 还剩 1 个` */
+/** 说明弹窗里的一行现状：`基础表格：已用 2/3，还剩 1 个` */
 export function tableQuotaSummary(quota: TableQuota): string {
-  return `${tableKindLabel(quota.kind)}：已添加 ${quota.used} 个 · 共 ${quota.total} 个名额 · 还剩 ${quota.remaining} 个`;
+  return `${tableKindLabel(quota.kind)}：已用 ${quota.used}/${quota.total}，还剩 ${quota.remaining} 个`;
 }
 
 /** 三类合计还能再添加几个：侧边栏「添加」按钮是否可点、名额用完的提示用它 */

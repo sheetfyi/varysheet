@@ -318,8 +318,8 @@ export const TABLE_KIND_FEATURES: TableKindFeature[] = [
   },
   {
     label: '存储时间',
-    trial: `${retentionText(TABLE_KIND_META.trial.retentionDays)}（超期自动清除）`,
-    basic: `${retentionText(TABLE_KIND_META.basic.retentionDays)}（超期自动清除）`,
+    trial: `${retentionText(TABLE_KIND_META.trial.retentionDays)}（超期清除）`,
+    basic: `${retentionText(TABLE_KIND_META.basic.retentionDays)}（超期清除）`,
     pro: retentionText(TABLE_KIND_META.pro.retentionDays),
   },
   {
@@ -336,14 +336,14 @@ export const TABLE_KIND_FEATURES: TableKindFeature[] = [
   },
   {
     label: '名额来源',
-    trial: '注册送 1 个，邀请新用户 +1（不能购买）',
-    basic: '只能购买（分享不赠额）',
-    pro: '只能购买（分享不赠额）',
+    trial: '注册送 1 个，邀请 +1，不出售',
+    basic: '只能购买（分享不加）',
+    pro: '只能购买（分享不加）',
   },
   {
     label: '价格',
-    trial: '免费（注册就送 1 个）',
-    basic: `${tableKindPriceText('basic')}，按时长购买（时长单位「月 / 年」× 时长数量）`,
-    pro: `${tableKindPriceText('pro')}，按时长购买（时长单位「月 / 年」× 时长数量）`,
+    trial: '免费（注册送 1 个）',
+    basic: `${tableKindPriceText('basic')}（按时长购买）`,
+    pro: `${tableKindPriceText('pro')}（按时长购买）`,
   },
 ];

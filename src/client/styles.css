@@ -1926,6 +1926,14 @@ textarea.input {
   white-space: nowrap;
 }
 
+/* 侧边栏收起时顶部条中间显示的登录用户昵称：放不下就收成省略号，别挤掉右侧按钮 */
+.app-bar .app-bar-user {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* 侧边栏收起时顶部条的右侧：只放后台图标按钮，用户信息在侧边栏底部（不再重复一遍） */
 .app-bar-admin {
   display: flex;
