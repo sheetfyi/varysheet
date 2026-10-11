@@ -269,7 +269,9 @@ jobs:
         if: steps.creds.outputs.ready == 'true'
         run: |
           set -euo pipefail
-          if ! npx wrangler deploy 2>&1 | tee /tmp/deploy.log; then
+          # `--var BUILD_ID` 给这次部署打上批次号（= 本次 commit）：/api/health 的 build
+          # 会返回它，下面的线上冒烟先等它生效再跑断言，避免撞上还在服务的上一版。
+          if ! npx wrangler deploy --var BUILD_ID:"${GITHUB_SHA}" 2>&1 | tee /tmp/deploy.log; then
             if grep -q '10181' /tmp/deploy.log; then
               echo "::error title=D1 数据库不存在::wrangler.jsonc 的 database_id（或 Secrets.D1_DATABASE_ID）不属于本账户。先 npx wrangler d1 create cloudnotion-db 建库、把返回的 id 回填到 wrangler.jsonc（或存成 D1_DATABASE_ID Secret）后重跑，见 DEPLOY.md 6.2"
             elif grep -qE 'Authentication error|10000|9109|Unauthorized' /tmp/deploy.log; then
@@ -285,17 +287,21 @@ jobs:
             echo "### Varysheet 部署完成 🚀"
             echo ""
             echo "- 线上地址：${url:-见本次运行日志}"
-            echo "- Commit：\`${GITHUB_SHA:0:7}\`"
+            echo "- Commit：\`${GITHUB_SHA:0:7}\`（部署批次 \`build=${GITHUB_SHA}\`，见 \`/api/health\`）"
             echo "- 冒烟测试（本地 e2e）：见上面 e2e job 的摘要"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: 同步可选 Secrets（邮件 / 管理员）到 Worker
+      - name: 同步可选 Secrets（邮件 / 管理员 / 测试域回显白名单）到 Worker
         if: steps.creds.outputs.ready == 'true'
         env:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           RESEND_FROM_EMAIL: ${{ secrets.RESEND_FROM_EMAIL }}
           ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
           ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+          # 配了它（例如 `example.com,example.org,example.net`）时，这些保留测试域的收件人不真发信、
+          # 直接把确认码回显在响应里：线上冒烟测试靠它走完两步注册。不配就跳过（此时只有「没配
+          # RESEND_API_KEY」的情况下才会回显）。
+          AUTH_ECHO_CODE_DOMAINS: ${{ secrets.AUTH_ECHO_CODE_DOMAINS }}
         run: |
           set -uo pipefail
           put() {
@@ -315,17 +321,22 @@ jobs:
           put RESEND_FROM_EMAIL "${RESEND_FROM_EMAIL:-}"
           put ADMIN_EMAIL "${ADMIN_EMAIL:-}"
           put ADMIN_PASSWORD "${ADMIN_PASSWORD:-}"
+          put AUTH_ECHO_CODE_DOMAINS "${AUTH_ECHO_CODE_DOMAINS:-}"
           {
             echo "### Worker 环境变量"
             echo ""
             echo "- 邮件发信：$([ -n "${RESEND_API_KEY:-}" ] && echo '已配置（真实发信）' || echo '未配置（确认码回显，仅适合测试）')"
             echo "- 超级管理员：$([ -n "${ADMIN_EMAIL:-}" ] && echo '已配置' || echo '未配置（用户管理页面无法访问）')"
+            echo "- 测试域回显白名单：$([ -n "${AUTH_ECHO_CODE_DOMAINS:-}" ] && echo "已配置（${AUTH_ECHO_CODE_DOMAINS}）" || echo '未配置（只有没配 RESEND_API_KEY 时才回显确认码）')"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 线上冒烟测试（对部署后的真实地址跑完整断言）
         if: steps.creds.outputs.ready == 'true' && inputs.skip_online_smoke != 'true'
         env:
           BASE_URL: ${{ steps.deploy.outputs.url }}
+          # 与部署步骤 `wrangler deploy --var BUILD_ID=<sha>` 是同一个值：冒烟测试会断言
+          # 目标跑的就是这次部署（见 /api/health 的 build 字段）
+          SMOKE_EXPECT_BUILD: ${{ github.sha }}
           # 仓库配了管理员 Secrets 就用同一套账号验证线上「用户管理」（未配置时回落到冒烟测试默认值 → 该段自动 skip）
           ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL || 'admin@example.com' }}
           ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD || 'Smoke1admin' }}
@@ -337,6 +348,26 @@ jobs:
             exit 0
           fi
           echo "线上目标地址：${BASE_URL}"
+          # `wrangler deploy` 返回时部署已经生效，但边缘上还在跑上一版的实例要几秒才换掉：
+          # 先等这次部署的批次号（build）真正在服务，再跑断言。否则会撞上上一版——实测撞过
+          # 一次：刚加的「购买时长白名单」断言被旧版本报成 201，看起来像代码写错了。
+          build_ready=false
+          live_build=''
+          for i in $(seq 1 30); do
+            live_build="$(curl -fsS "${BASE_URL}/api/health" | grep -Eo '"build":"[^"]*"' | head -n 1 | cut -d'"' -f4 || true)"
+            if [ "${live_build}" = "${SMOKE_EXPECT_BUILD}" ]; then
+              build_ready=true
+              echo "新版本已在线上服务（第 ${i} 次探测，约 $((i * 3)) 秒）"
+              break
+            fi
+            sleep 3
+          done
+          if [ "${build_ready}" = true ]; then
+            echo "- 线上版本：\`build=${live_build}\`（等待传播约 $((i * 3)) 秒）" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::error title=新版本未传播到边缘::${BASE_URL} 报告的 build=${live_build:-（没有 build 字段）}，期望 ${SMOKE_EXPECT_BUILD}；下面的冒烟测试会因此报「the target runs the freshly deployed build」失败"
+            echo "- 线上版本：新版本未传播（读到 \`build=${live_build:-无}\`，期望 \`${SMOKE_EXPECT_BUILD}\`）" >> "$GITHUB_STEP_SUMMARY"
+          fi
           node scripts/smoke-test.mjs 2>&1 | tee /tmp/smoke-online.log
           count="$(grep -Eo '[0-9]+/[0-9]+ checks passed' /tmp/smoke-online.log | tail -n 1 || true)"
           echo "- 线上冒烟测试（${BASE_URL}）：${count:-已通过 ✅}" >> "$GITHUB_STEP_SUMMARY"

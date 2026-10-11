@@ -30,6 +30,12 @@
  * admin check (resetting your own password) only runs for disposable test
  * admins on the reserved example.* domains; set SMOKE_ADMIN_SELF_RESET=1 to
  * force it.
+ *
+ * CI's online run also passes SMOKE_EXPECT_BUILD=<commit sha> (the same value
+ * the deploy step injects with `wrangler deploy --var BUILD_ID=<sha>`): the
+ * script then asserts that /api/health reports that build, i.e. the edge is
+ * already serving the fresh deployment instead of the previous one. Leave the
+ * variable unset (local runs) and the assertion is skipped.
  */
 const BASE = (process.env.BASE_URL ?? 'http://127.0.0.1:8787').replace(/\/+$/, '');
 const PASSWORD = process.env.SMOKE_PASSWORD ?? 'Smoke1test';
@@ -46,6 +52,12 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD ?? 'Smoke1admin';
  */
 const DISPOSABLE_ADMIN =
   /@example\.(com|org|net)$/i.test(ADMIN_EMAIL) || process.env.SMOKE_ADMIN_SELF_RESET === '1';
+/**
+ * CI 用：断言目标跑的就是这次部署（`SMOKE_EXPECT_BUILD=<commit sha>`，
+ * 与 CI 部署时 `wrangler deploy --var BUILD_ID=<sha>` 注入的是同一个值）；
+ * 不设就跳过这条断言（本地 / 手动跑不受影响）。
+ */
+const EXPECT_BUILD = (process.env.SMOKE_EXPECT_BUILD ?? '').trim();
 
 let cookie = '';
 const checks = [];
@@ -162,7 +174,21 @@ async function main() {
   }
 
   const health = await call('/api/health');
-  check('health payload', health.data?.ok === true, `${health.data?.app ?? ''}`);
+  check(
+    'health payload',
+    health.data?.ok === true,
+    `${health.data?.app ?? ''}${health.data?.build ? ` build=${health.data.build}` : ''}`,
+  );
+  // 紧贴 `wrangler deploy` 跑线上冒烟时，边缘可能还在服务上一版（实测撞过一次：新加的
+  // 「购买时长白名单」断言被旧版本报成 201）。CI 会先等新 build 生效再跑，这里再断言一次，
+  // 万一没等到也能直接点出原因，而不是让后面某条业务断言莫名其妙地变红。
+  if (EXPECT_BUILD) {
+    check(
+      'the target runs the freshly deployed build',
+      health.data?.build === EXPECT_BUILD,
+      `build=${health.data?.build ?? ''} expect=${EXPECT_BUILD}`,
+    );
+  }
 
   // ---------------------------------------------------------------- account
   section('account');

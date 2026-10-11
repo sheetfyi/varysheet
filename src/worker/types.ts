@@ -28,6 +28,12 @@ export interface Env {
   D1_API_BASE?: string;
   /** 站点名称（品牌）的兜底值；管理员可在「后台 → 站点设置」里覆盖（存在 D1 settings 表） */
   APP_NAME?: string;
+  /**
+   * 部署批次标识：CI 用 `wrangler deploy --var BUILD_ID=<commit sha>` 注入，手动 / 本地部署没有。
+   * `/api/health` 会把它作为 `build` 返回，线上冒烟测试靠它确认「新版本真的在服务」——
+   * 紧贴 `wrangler deploy` 启动时边缘还有几秒在跑上一版（见 .github/workflows/deploy.yml）。
+   */
+  BUILD_ID?: string;
   MAX_UPLOAD_MB?: string;
   /** 单张表格的记录数上限（默认 500）：到上限后只能查看 / 查询，不再接受新增；只作用于基础表格 */
   MAX_DATABASE_RECORDS?: string;

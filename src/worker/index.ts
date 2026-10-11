@@ -103,8 +103,16 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   try {
     if (url.pathname === '/api/health') {
-      // 站点名称在后台可改，健康检查只用环境变量 / 代码默认值，避免多查一次数据库
-      return json({ ok: true, app: env.APP_NAME ?? DEFAULT_SITE_NAME, time: Date.now() });
+      // 站点名称在后台可改，健康检查只用环境变量 / 代码默认值，避免多查一次数据库。
+      // build 是这次部署的批次号（CI 传 `--var BUILD_ID=<commit sha>`）：刚部署完边缘还有
+      // 几秒在跑上一版，线上冒烟测试先等这里报出新的 build 再跑断言，免得撞上旧版本
+      // （见 .github/workflows/deploy.yml 的线上冒烟步骤）。
+      return json({
+        ok: true,
+        app: env.APP_NAME ?? DEFAULT_SITE_NAME,
+        build: env.BUILD_ID ?? null,
+        time: Date.now(),
+      });
     }
 
     const { match, otherMethod } = matchRoute(request.method.toUpperCase(), url.pathname);

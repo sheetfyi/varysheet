@@ -107,9 +107,9 @@ npm run deploy                 # vite build && wrangler deploy
 ## 5. 部署后验证
 
 ```bash
-# 冒烟测试（259 项断言，覆盖两步注册/登录/建表/记录/视图/分享/成员/附件/单表容量/表格类型与名额/改密码/用户管理/会话兜底）
+# 冒烟测试（270 项断言，覆盖两步注册/登录/建表/记录/视图/分享/成员/附件/单表容量/表格类型与名额/改密码/用户管理/会话兜底）
 # 线上跑同一套断言：唯一会改密码的「重置自己密码」只对 @example.* 测试管理员执行，
-# 真实 ADMIN_EMAIL 会自动跳过那 2 项（结果 257/257），不会重置你的密码、也不会踢你下线
+# 真实 ADMIN_EMAIL 会自动跳过那 2 项（结果 269/269），不会重置你的密码、也不会踢你下线
 BASE_URL=https://varysheet.<your-subdomain>.workers.dev node scripts/smoke-test.mjs
 
 # 路由自检
@@ -118,8 +118,13 @@ npm run check:routes
 
 > 线上跑冒烟测试前，建议先在 Worker 上配好 `ADMIN_EMAIL` + `ADMIN_PASSWORD`（第 6.6 节）：
 > 配了就会连「用户管理」一起测（工作流会把仓库里同名的 Secrets 透传给线上冒烟测试；未配置时回落到
-> `admin@example.com`，该段自动 `skip`，其余断言照跑 —— 实测这类跑法是 **223/223 checks passed**，
+> `admin@example.com`，该段自动 `skip`，其余断言照跑 —— 实测这类跑法是 **247/247 checks passed**，
 > 不是失败，别误判）。
+>
+> 工作流跑的就是这套脚本，只是多传两个东西：`SMOKE_EXPECT_BUILD=<commit sha>`（断言线上跑的就是
+> 这次部署，读的就是 `/api/health` 的 `build`）和「先等新版本生效」（每 3 秒探一次，最多约 90 秒）。
+> `wrangler deploy` 返回时部署已经生效，但边缘上还在跑上一版的实例要几秒才换掉，不等就可能撞上旧版本
+> —— 实测被旧版误报过一次失败（刚加的「购买时长白名单」断言被上一版报成 201）。
 > 唯一会改数据的断言是「重置自己密码」——它只对 `@example.*` 的测试管理员跑，
 > 线上用真实 `ADMIN_EMAIL` 时会自动跳过（不会重置你的密码 / 踢你下线；要强制跑设 `SMOKE_ADMIN_SELF_RESET=1`）。
 > 另外注册/重置密码时只有**保留测试域**（`AUTH_ECHO_CODE_DOMAINS`）才会回显确认码，
@@ -149,7 +154,7 @@ npm run check:routes
 | --- | --- | --- |
 | 1 | `verify` | `npm ci` → `npm run typecheck`（client + worker）→ `npm run check:routes` → `npm run schema:check`（分片 DDL 与迁移文件是否同步）→ `vite build` |
 | 2 | `e2e` | 本地 D1 迁移（用户库 + 三个分片库） → 后台启动 `wrangler dev --local` → 运行 `scripts/smoke-test.mjs`（断言数见运行日志 / Step Summary） |
-| 3 | `deploy` | `node scripts/sync-d1-ids.mjs --create`（按库名对齐四个 D1 库的 id，缺了就现建） → 确保 R2 桶存在 → `npm run db:migrate:remote` → `vite build` → `wrangler deploy` → 同步可选 Secrets → 对线上地址再跑一遍完整冒烟测试 |
+| 3 | `deploy` | `node scripts/sync-d1-ids.mjs --create`（按库名对齐四个 D1 库的 id，缺了就现建） → 确保 R2 桶存在 → `npm run db:migrate:remote` → `vite build` → `wrangler deploy --var BUILD_ID=<commit sha>`（给这次部署打批次号，`/api/health` 的 `build` 会返回它） → 同步可选 Secrets → **等新版本真的在线上服务**（轮询 `/api/health` 的 `build`，每 3 秒一次、最多约 90 秒；没等到会以明确错误停下） → 对线上地址再跑一遍完整冒烟测试（比本地多 1 项：目标跑的就是这次部署） |
 
 ### 6.1 一次性配置 Secrets
 
@@ -167,8 +172,9 @@ npm run check:routes
 | `RESEND_FROM_EMAIL` | ➖ | 发件人，默认 `Varysheet <admin@varysheet.com>` |
 | `ADMIN_EMAIL` | ➖ | 超级管理员邮箱，登录时自动创建 / 提升该账号；默认 `admin@varysheet.com` |
 | `ADMIN_PASSWORD` | ➖ | 管理员首次创建时用的密码（8 位以上、含字母与数字） |
+| `AUTH_ECHO_CODE_DOMAINS` | ➖ | 逗号分隔的保留测试域（如 `example.com,example.org,example.net`）：这些收件人不真发信，直接把确认码回显在响应里。线上冒烟测试靠它走完两步注册，所以配了 `RESEND_API_KEY`（开始真实发信）之后建议一并配上——只影响白名单里的测试域，真实用户不受影响 |
 
-后 4 个可选 Secret 会在 `deploy` 阶段（部署成功之后）由 `wrangler secret put` 自动写入 Worker，未配置就跳过；
+后 5 个可选 Secret 会在 `deploy` 阶段（部署成功之后）由 `wrangler secret put` 自动写入 Worker，未配置就跳过；
 `e2e` 阶段用的是另一套**用完即弃**的本地 `.dev.vars`（`admin@example.com` + 确认码回显白名单），
 不会影响线上账号。手动配置与本地开发见 [6.6 邮件（Resend）与超级管理员](#66-邮件resend与超级管理员)。
 
