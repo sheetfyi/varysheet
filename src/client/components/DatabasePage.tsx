@@ -932,7 +932,13 @@ export function DatabasePage({
   };
 
   const deleteDatabase = async () => {
-    if (!window.confirm(`确定删除表格「${detail.name}」？此操作不可恢复。`)) return;
+    // 名额口径（见 src/worker/slots.ts）：试用表格删掉会退还名额；
+    // 基础 / 专业表格删掉则把名额一起带走（名额不退还，已付的钱也不退），这里先提醒一句
+    const quotaNote =
+      detail.kind === 'trial'
+        ? '删除后会释放这个试用名额。'
+        : '删除后这个名额不会退还（已购买的费用也不退）。';
+    if (!window.confirm(`确定删除表格「${detail.name}」？此操作不可恢复。\n${quotaNote}`)) return;
     try {
       await api.deleteDatabase(detail.id);
       onReloadList();
@@ -944,7 +950,7 @@ export function DatabasePage({
 
   const applyViewShares = (next: ViewShare[]) => setDetail((prev) => ({ ...prev, viewShares: next }));
 
-  /** 分享 / 取消分享一个视图之后：顺手刷新侧边栏（专业表格的名额会跟着 ±1，基础表格不变） */
+  /** 分享 / 取消分享一个视图之后：顺手刷新侧边栏（分享不再增减名额，见 shared/quota.ts） */
   const applyViewSharesAndReload = (next: ViewShare[]) => {
     applyViewShares(next);
     onReloadList();

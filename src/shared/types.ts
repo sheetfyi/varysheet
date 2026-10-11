@@ -365,12 +365,13 @@ export interface DatabaseCapacity {
  *   - 专业表格：同样没有赠送名额（**分享也不加**），只能购买（99.9 元/月）。
  * 购买时长按「单位 × 数量」选：时长单位「月」（1 个月）或「年」（12 个月），时长数量月 1 ~ 12 个 /
  * 年 1 ~ 5 个（总月数 = 单位月数 × 数量，1 ~ 60 个月）。
- * 「已用」只算自己拥有的、未归档的、这一类型的表格，别人分享给你的表不算。
+ * 「已用」= 自己拥有的、未归档的这一类型表格数 **+ 被删掉时把名额带走的基础 / 专业表格数**
+ * （删表不退还名额，见 `src/worker/slots.ts`）；别人分享给你的表不算，试用表格删掉会退还。
  */
 export interface TableQuota {
   /** 这一份名额属于哪一类表格 */
   kind: TableKind;
-  /** 已拥有的这一类表格数（不含归档） */
+  /** 已用掉的名额（未归档的表格 + 删表带走的名额，不含归档） */
   used: number;
   /**
    * 赠额：
@@ -432,6 +433,11 @@ export interface TablePurchase {
   amountCents: number;
   /** 渠道：`self-serve`（自助直通）/ `xorpay:native`（微信扫码支付）/ `admin-grant`（管理员赠额） */
   channel: string;
+  /**
+   * 续费的是哪张表（`table_slot_allocations.database_id`）。
+   * 空串 = 这一笔是**新增名额**；非空 = 给这张基础 / 专业表格续时长（名额统计会跳过它）。
+   */
+  databaseId: string;
   note: string;
   createdAt: number;
 }
@@ -453,6 +459,11 @@ export interface TableOrder {
   months: number;
   /** 应付金额（分），服务端算好冻结在这一行 */
   amountCents: number;
+  /**
+   * 这一单是给哪张表续费（空串 = 普通购买，交付时新增名额；
+   * 非空 = 交付时给这张表续时长，不新增名额，见 `src/worker/slots.ts`）。
+   */
+  databaseId: string;
   /** 实收金额（分），回调对账用 */
   paidCents: number;
   status: TableOrderStatus;
@@ -492,6 +503,11 @@ export interface DatabaseSummary {
   rowCount?: number;
   /** 单表容量用量：侧边栏里每张表后面的进度条 */
   capacity: DatabaseCapacity;
+  /**
+   * 自己拥有的基础 / 专业表格的到期时刻（毫秒）；0 / 缺失 = 没有时长记录（老表或试用表格）。
+   * 剩余不到 `SLOT_RENEW_WINDOW_DAYS` 天时，清单里这张表后面会出现「续费」（见 `shared/quota.ts`）。
+   */
+  slotExpiresAt?: number;
 }
 
 export interface DatabaseDetail extends CellEditLocks {
@@ -644,6 +660,11 @@ export interface BrandingResponse {
   iconUrl: string | null;
   /** 设置最后修改时间（毫秒），作为图标地址的破缓存版本号 */
   updatedAt: number;
+  /**
+   * 登录页的副标题（管理员在「后台 → 站点设置」里改；空 = 用默认文案）。
+   * 登录页「登录 / 注册」两种模式的说明文字都用它，见 `components/AuthPage.tsx`。
+   */
+  loginTagline: string;
 }
 
 /** 后台「站点设置」：`GET /api/admin/settings`（Resend 密钥只回传掩码，完整值不出服务端）。 */
@@ -651,6 +672,10 @@ export interface AdminSettings {
   siteName: string;
   iconUrl: string | null;
   hasIcon: boolean;
+  /** 登录页副标题（管理员在这里改，保存后登录页立刻跟着变；空 = 用代码默认值） */
+  loginTagline: string;
+  /** 登录页副标题是否就是代码里的默认值（数据库里没配） */
+  loginTaglineIsDefault: boolean;
   /** 生效中的超级管理员邮箱（该邮箱登录 / 带会话访问时会被自动提升为管理员） */
   adminEmail: string;
   /** 管理员邮箱是否来自 Worker 环境变量 / secret（数据库里没配） */
@@ -675,7 +700,7 @@ export interface AdminSettings {
   /** 当前开放的支付方式（默认只有 `native` = 微信扫码） */
   xorpayPayTypes: XorpayPayType[];
   /** 代码里的默认值（前端提示「当前用的是默认值」时用） */
-  defaults: { siteName: string; adminEmail: string; resendFromEmail: string };
+  defaults: { siteName: string; adminEmail: string; resendFromEmail: string; loginTagline: string };
   /** `settings` 表里最后修改时间（0 = 表里什么都没有） */
   updatedAt: number;
 }

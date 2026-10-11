@@ -351,6 +351,9 @@ export async function deleteAdminUsers(
     await env.DB.batch([
       env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(id),
       env.DB.prepare('DELETE FROM note_mentions WHERE user_id = ?').bind(id),
+      // 名额记账（删表带走的名额 / 每张表的时长）也跟着账号一起清掉
+      env.DB.prepare('DELETE FROM table_slot_consumptions WHERE user_id = ?').bind(id),
+      env.DB.prepare('DELETE FROM table_slot_allocations WHERE user_id = ?').bind(id),
       env.DB.prepare('DELETE FROM users WHERE id = ?').bind(id),
     ]);
 

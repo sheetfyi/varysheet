@@ -17,7 +17,7 @@ import type {
 import { purchaseMonthsLabel, tableKindLabel } from '../shared/tableKind';
 import type { XorpayPayType } from '../shared/xorpay';
 import { ApiError, api, setSessionToken, type QuotaOrderResponse, type SessionPayload } from './api';
-import { applyBranding } from './branding';
+import { applyBranding, DEFAULT_LOGIN_TAGLINE } from './branding';
 import { AdminSystemPanel, AdminUsersPanel, type AdminSection } from './components/AdminPanel';
 import { AuthPage } from './components/AuthPage';
 import { ChangePasswordDialog } from './components/ChangePasswordDialog';
@@ -134,6 +134,11 @@ export function App() {
   const [appName, setAppName] = useState('Varysheet');
   /** 站点图标（管理员在后台传过才有）：`<title>` 与 favicon 也跟着它走 */
   const [siteIconUrl, setSiteIconUrl] = useState<string | null>(null);
+  /**
+   * 登录页副标题（管理员在「后台 → 站点设置」里改的那句）；
+   * 跟着会话 / 品牌信息走，未登录时登录卡片直接用它。
+   */
+  const [loginTagline, setLoginTagline] = useState(DEFAULT_LOGIN_TAGLINE);
   const [user, setUser] = useState<SessionUser | null>(null);
   const [databases, setDatabases] = useState<DatabaseSummary[]>([]);
   /** 表格名额（试用 / 基础 / 专业各自还能加几张）：侧边栏显示，登录与刷新列表时更新 */
@@ -207,6 +212,8 @@ export function App() {
   const applyBrandingChange = useCallback((branding: BrandingResponse) => {
     setAppName(branding.siteName);
     setSiteIconUrl(branding.iconUrl);
+    // 登录页副标题也在品牌信息里：管理员改完保存，登录页立刻跟着变
+    setLoginTagline((branding.loginTagline ?? '').trim() || DEFAULT_LOGIN_TAGLINE);
   }, []);
 
   /**
@@ -235,6 +242,10 @@ export function App() {
         const payload = await api.session();
         setAppName(payload.appName);
         setSiteIconUrl(payload.siteIconUrl ?? null);
+        // 登录页副标题：管理员在后台改过就用它，没拿到（老服务端）就沿用当前值
+        if (typeof payload.loginTagline === 'string') {
+          setLoginTagline(payload.loginTagline.trim() || DEFAULT_LOGIN_TAGLINE);
+        }
         setUser(payload.user);
         setDatabases(payload.databases);
         // 会话里带着名额：侧边栏一进来就能显示「还能添加几个表格」
@@ -452,34 +463,49 @@ export function App() {
    *   - 没开通收款：后端直接到账，这里顺手刷新名额并提示。
    * 两种情况都先按服务端返回的权威名额刷新侧边栏数字。
    */
+  /**
+   * 最近一次下单是不是「续费」：支付到账（弹窗轮询回来）时已经拿不到这次 input 了，
+   * 用它决定提示文案与是否要刷新表格清单。
+   */
+  const lastOrderWasRenewal = useRef(false);
+
   const orderQuota = useCallback(
     async (input: {
       kind: TableKind;
       count: number;
       months: number;
       payType: XorpayPayType;
+      /** 续费哪张表格（表格清单里的「续费」按钮）；不传 = 普通购买 */
+      databaseId?: string;
     }): Promise<QuotaOrderResponse> => {
       const result = await api.createQuotaOrder(input);
       setQuota(result.quota);
       // 下单响应里带着「收款是否已开通」，顺手矫正一下本地状态（管理员刚填完密钥的情况）
       setPayment((prev) => (prev ? { ...prev, enabled: result.paymentEnabled } : prev));
+      lastOrderWasRenewal.current = Boolean(input.databaseId);
       if (result.purchase) {
+        // 立刻到账（未开通收款）：续费要把清单里的到期时间一起刷新
+        if (input.databaseId) void refreshList();
         toast(
-          `已购买 ${input.count} 个${tableKindLabel(input.kind)}名额（${purchaseMonthsLabel(input.months)}），现在可以添加了`,
+          input.databaseId
+            ? `已续费 ${purchaseMonthsLabel(input.months)}：「${input.databaseId}」的到期时间已往后推`
+            : `已购买 ${input.count} 个${tableKindLabel(input.kind)}名额（${purchaseMonthsLabel(input.months)}），现在可以添加了`,
         );
       }
       return result;
     },
-    [toast],
+    [refreshList, toast],
   );
 
   /** 支付到账（弹窗轮询到账后回调）：刷新名额并提示，弹窗那边会自己关闭 */
   const handleQuotaPaid = useCallback(
     (next: TableQuotaSet) => {
       setQuota(next);
-      toast('支付成功，名额已到账');
+      // 续费到账：清单里的到期时间变了，顺手刷新一次（「续费」按钮跟着重新判断）
+      void refreshList();
+      toast(lastOrderWasRenewal.current ? '支付成功：到期时间已往后推' : '支付成功，名额已到账');
     },
-    [toast],
+    [refreshList, toast],
   );
 
   const logout = useCallback(async () => {
@@ -560,7 +586,14 @@ export function App() {
         </div>
       );
     }
-    return <AuthPage appName={appName} siteIconUrl={siteIconUrl} onAuthenticated={reauthenticate} />;
+    return (
+      <AuthPage
+        appName={appName}
+        siteIconUrl={siteIconUrl}
+        loginTagline={loginTagline}
+        onAuthenticated={reauthenticate}
+      />
+    );
   }
 
   return (

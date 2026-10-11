@@ -2213,9 +2213,13 @@ npx wrangler secret delete XORPAY_APP_SECRET
 
 - [ ] `npm run typecheck` / `build:client` / `check:routes` / `check:scripts` / `schema:check` 全绿
 - [ ] 本地假网关：下单 → 二维码 → 模拟付款 → 名额到账（≤3 秒）
-- [ ] 本地未配支付：`npm run test:e2e` **271** 项断言全绿（老行为没坏）
-- [ ] 本地配假网关（`XORPAY_AID` / `XORPAY_APP_SECRET` / `XORPAY_API_BASE`）：`npm run test:e2e` **273** 项断言全绿
-      （多「下单要在线支付（202 + 二维码）」与「管理员赠额兜底」两条；已实测 273/273）
+- [ ] 本地未配支付：`npm run test:e2e` **278** 项断言全绿（老行为没坏）
+- [ ] 本地配假网关（`XORPAY_AID` / `XORPAY_APP_SECRET` / `XORPAY_API_BASE`）：`npm run test:e2e` **280** 项断言全绿
+      （多「下单要在线支付（202 + 二维码）」与「管理员赠额兜底」两条；2026-10 又新增「删表不退名额 / 续费 / 登录页副标题」7 条，
+      两种模式都已实测全绿）
+- [ ] 续费全链路（假网关）：建表 → 清单里点「续费」下单（202 + 二维码，订单带 `databaseId`）
+      → `curl.exe -X POST http://127.0.0.1:8788/__pay/<订单号>` → 订单 `paid`、表格 `slotExpiresAt` 往后推一个月、
+      `basic.remaining` 与 `purchased` 都不变
 - [ ] 伪造 `sign` 的回调被拒（400），订单仍 pending
 - [ ] 同一回调重发 3 次，名额只加一次
 - [ ] 少付 1 分：订单 `amount_mismatch`，名额不加
@@ -2225,6 +2229,29 @@ npx wrangler secret delete XORPAY_APP_SECRET
 - [ ] 文档同步：README / DEPLOY / docs/storage.md 里「支付尚未接入」的句子已全部改掉
       （README 的「表格名额」行、`src/shared/types.ts` 里 `TablePurchase` 的注释、
       `migrations/control/0011` 与 `0015` 的历史说明可以保留原文，但要在新迁移 0016 里说明演进）
+
+### 10.4 表格续费：复用同一套下单 / 支付（2026-10 新增）
+
+基础 / 专业表格现在各自带一段「时长」（建表时按该类型最近一次购买的时长起算，
+存在用户库的 `table_slot_allocations.expires_at`，计算与校验见 `src/worker/slots.ts`）。
+剩余不到一周（`SLOT_RENEW_WINDOW_DAYS = 7`）时，表格清单里这张表后面会出现「续费」，
+点开的就是同一个「表格数量说明」弹窗（切到续费模式：类型 / 数量锁死），
+下单仍然走 `POST /api/quota/orders`，只是多带一个 `databaseId`：
+
+| 环节 | 复用点 | 续费的差别 |
+| --- | --- | --- |
+| 下单 | `createOrderForUser()`（同一个函数） | 先 `resolveRenewTarget()` 校验表格归属与类型（不存在 404、类型对不上 400、`count` 必须为 1）；订单多写一列 `database_id` |
+| 价格 | `purchaseAmountCents(kind, 1, months)` | 完全相同：基础 9.9 元/月、专业 99.9 元/月，月 / 年单位与数量范围也一致 |
+| 支付 | 同一条 XorPay 下单 + 回调 / 查单兜底 | 商品名写成「基础表格续费 × 1（1 个月）」，微信账单上一眼能看出是续费 |
+| 交付 | `deliverOrder()`（幂等状态守卫与流水写入都不变） | 流水带 `database_id`（`GET /api/quota` 的「已购买」会跳过它），再调 `renewSlot()` 把 `expires_at` 从 `max(now, 原到期时间)` 往后推 |
+| 名额 | — | **不增加**可添加的表格名额：买的是这张表的时间，不是新名额 |
+
+没开通收款（本地 / CI）时同样是「下单即到账」：自助直通分支写完流水就顺手 `renewSlot()`，
+两种模式下续费的行为一致。表结构见 `migrations/control/0017_slot_renewals.sql`。
+
+> 同一次改动也把「删表与名额」的关系定死了：**基础 / 专业表格被删掉后名额不退还**
+> （`table_slot_consumptions` 记一笔，`GET /api/quota` 的「已用」把它算进去，已付的钱也不退），
+> 试用表格保持原样（删掉就把名额还回来）。
 
 ---
 

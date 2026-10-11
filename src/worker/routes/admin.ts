@@ -213,6 +213,8 @@ async function updateSettingsHandler(ctx: RequestContext): Promise<Response> {
   if (body.siteName !== undefined) patch.siteName = asString(body.siteName, '站点名称', { required: true, max: 60 });
   if (body.adminEmail !== undefined) patch.adminEmail = normalizeAdminEmail(body.adminEmail);
   if (body.resendFromEmail !== undefined) patch.resendFromEmail = normalizeFromAddress(body.resendFromEmail);
+  // 登录页副标题：留空 = 清掉数据库里的值、退回默认文案（按需求做成后台可改的字段）
+  if (body.loginTagline !== undefined) patch.loginTagline = asString(body.loginTagline, '登录页副标题', { max: 60 });
   if (body.resendApiKey !== undefined) patch.resendApiKey = normalizeSecret(body.resendApiKey, 'Resend 密钥');
   // XorPay 收款：填上 appid + app secret 就立刻开启「微信扫码购买」（不用重新部署）
   if (body.xorpayAid !== undefined) patch.xorpayAid = normalizeXorpayAid(body.xorpayAid);

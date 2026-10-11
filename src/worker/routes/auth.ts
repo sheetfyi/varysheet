@@ -242,7 +242,12 @@ async function sessionHandler(ctx: RequestContext): Promise<Response> {
   await ensureAdminUser(ctx.env, settings.adminEmail);
 
   const user = await getCurrentUser(ctx.request, ctx.env);
-  const branding = { appName: settings.siteName, siteIconUrl: siteIconUrl(settings) };
+  const branding = {
+    appName: settings.siteName,
+    siteIconUrl: siteIconUrl(settings),
+    // 登录页副标题：未登录时前端拿它显示「登录以继续你的表格」那句话（可在后台改）
+    loginTagline: settings.loginTagline,
+  };
   if (!user) {
     return json({
       ...sessionResponse(null),

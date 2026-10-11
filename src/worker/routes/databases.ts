@@ -46,6 +46,7 @@ import {
 } from '../http';
 import { deliverViewInvite, issueViewInvite } from '../invites';
 import { loadTableQuota } from './quota';
+import { allocateSlot, loadSlotAllocations, recordSlotConsumption } from '../slots';
 import {
   databaseSummaryFromRow,
   memberFromRow,
@@ -133,6 +134,8 @@ export async function listDatabases(env: Env, userId: string): Promise<DatabaseS
   for (const row of rows) {
     row.owner_name = ownerLabel(owners.get(sqlString(row, 'owner_id')));
   }
+  // 表格的到期时间（续费窗口）也在用户库：一次读全自己在基础 / 专业分片上的表的时长
+  const slotExpiresAt = await loadSlotAllocations(env, userId);
 
   return rows.map((row) => {
     const role = sqlString(row, 'role', 'viewer') as Role;
@@ -141,7 +144,7 @@ export async function listDatabases(env: Env, userId: string): Promise<DatabaseS
     // 结果集只包含「所有者 / 表格成员 / 视图定向分享」三种来源：
     // 既不是所有者也不是成员（且能查出来）就说明访问权只来自定向分享的视图。
     const viewScoped = role !== 'owner' && sqlNumber(row, 'is_member') !== 1;
-    return databaseSummaryFromRow(
+    const summary = databaseSummaryFromRow(
       row,
       role,
       sharedViewNames.get(sqlString(row, 'id')) ?? [],
@@ -149,6 +152,9 @@ export async function listDatabases(env: Env, userId: string): Promise<DatabaseS
       // 记录数 + 附件占用：和表格在同一个查询里算出来，避免一张表一次往返
       capacityFromUsage(usageFromRow(row), capacityLimits(env, kind)),
     );
+    // 只有自己拥有的基础 / 专业表格才有时长（续费窗口）：数据在用户库，这里在 JS 里合并
+    if (role === 'owner' && kind !== 'trial') summary.slotExpiresAt = slotExpiresAt.get(summary.id) ?? 0;
+    return summary;
   });
 }
 
@@ -634,6 +640,8 @@ async function createHandler(ctx: RequestContext): Promise<Response> {
   }
 
   const created = await createDatabase(ctx.env, user.id, { name, icon, description, templateId, kind });
+  // 基础 / 专业表格自带时长：按该类型最近一次购买的时长起算（剩余不到一周时清单里会出现「续费」）
+  await allocateSlot(ctx.env, { userId: user.id, databaseId: created.databaseId, kind });
   const access = ownerAccess(created.db, created.databaseId, user.id);
   return json(await buildDatabaseDetail(ctx.env, created.db, created.databaseId, access, ctx.url), {
     status: 201,
@@ -732,6 +740,12 @@ async function deleteHandler(ctx: RequestContext): Promise<Response> {
   await requireDatabaseAccess(ctx, ctx.params.id, user, 'manage');
   const db = tableDb(ctx);
 
+  // 删表要把名额一起带走（基础 / 专业表格不退还，见 worker/slots.ts）：先记下类型与所有者
+  const meta = await db
+    .prepare('SELECT owner_id, kind FROM databases WHERE id = ?')
+    .bind(ctx.params.id)
+    .first<SqlRow>();
+
   // purge the uploaded blobs from R2 before dropping the metadata
   const { results } = await db
     .prepare('SELECT r2_key FROM files WHERE database_id = ?')
@@ -743,6 +757,14 @@ async function deleteHandler(ctx: RequestContext): Promise<Response> {
   }
 
   await db.prepare('DELETE FROM databases WHERE id = ?').bind(ctx.params.id).run();
+  // 记一笔「这个名额被带走了」：试用表格不记账（删掉照旧退还名额）
+  if (meta && sqlString(meta, 'owner_id') === user.id) {
+    await recordSlotConsumption(ctx.env, {
+      userId: user.id,
+      databaseId: ctx.params.id,
+      kind: sqlString(meta, 'kind', 'basic'),
+    });
+  }
   return json({ ok: true });
 }
 

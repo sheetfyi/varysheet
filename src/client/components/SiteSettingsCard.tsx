@@ -30,6 +30,8 @@ const ICON_ACCEPT =
 export function SiteSettingsCard({ onToast, onBrandingChange, onReloadSession }: SiteSettingsCardProps) {
   const [settings, setSettings] = useState<AdminSettings | null>(null);
   const [siteName, setSiteName] = useState('');
+  /** 登录页副标题（登录卡片上的那句说明；留空 = 用默认文案） */
+  const [loginTagline, setLoginTagline] = useState('');
   const [adminEmail, setAdminEmail] = useState('');
   const [fromEmail, setFromEmail] = useState('');
   const [apiKey, setApiKey] = useState('');
@@ -48,6 +50,7 @@ export function SiteSettingsCard({ onToast, onBrandingChange, onReloadSession }:
   const applySettings = useCallback((next: AdminSettings) => {
     setSettings(next);
     setSiteName(next.siteName);
+    setLoginTagline(next.loginTaglineIsDefault ? '' : next.loginTagline);
     setAdminEmail(next.adminEmail);
     setFromEmail(next.resendFromEmail);
     setApiKey('');
@@ -83,6 +86,8 @@ export function SiteSettingsCard({ onToast, onBrandingChange, onReloadSession }:
     try {
       const payload = await api.adminUpdateSettings({
         siteName: siteName.trim(),
+        // 登录页副标题：留空提交 = 清掉数据库里的值，退回默认文案
+        loginTagline: loginTagline.trim(),
         adminEmail: nextAdminEmail,
         resendFromEmail: fromEmail.trim(),
         // 没动过的密钥不提交：PATCH 里没有这个字段 = 保持原样（提交掩码会被当成新密钥存进去）
@@ -194,6 +199,20 @@ export function SiteSettingsCard({ onToast, onBrandingChange, onReloadSession }:
             onChange={(event) => setSiteName(event.target.value)}
           />
           <span className="small muted">不能为空，最多 60 字；内置默认值：{settings.defaults.siteName}</span>
+        </label>
+
+        <label className="field">
+          <span>登录页副标题</span>
+          <input
+            className="input"
+            value={loginTagline}
+            maxLength={60}
+            placeholder={settings.defaults.loginTagline}
+            onChange={(event) => setLoginTagline(event.target.value)}
+          />
+          <span className="small muted">
+            登录界面标题下那句说明（未登录时显示）；留空 = 用默认文案「{settings.defaults.loginTagline}」
+          </span>
         </label>
 
         <div className="field">

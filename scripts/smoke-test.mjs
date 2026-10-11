@@ -2436,20 +2436,77 @@ async function main() {
     `trial=${JSON.stringify(settledTrial?.trial)}`,
   );
 
-  // 清理：删掉分享链接与这两张测试表，别给后面的段落留下干扰
+  // 清理：删掉分享链接与这两张测试表。**基础 / 专业表格删掉不退还名额**（口径见 worker/slots.ts）：
+  // 「已用」不回落、可添加的数量也不会回来（试用表格那一段已经验过会退还）。
   await call(`/api/shares/${(quotaShare.data?.shares ?? [])[0]?.id}`, { method: 'DELETE' });
   const removedProTable = await call(`/api/databases/${proTable.data?.id}`, { method: 'DELETE' });
   const removedQuotaTable = await call(`/api/databases/${quotaTable.data?.id}`, { method: 'DELETE' });
   const settledQuota = (await call('/api/quota')).data?.quota;
   check(
-    'removing the test tables and the link restores the quota',
+    'deleting basic / pro tables keeps their slots spent (no refund)',
     removedProTable.data?.ok === true &&
       removedQuotaTable.data?.ok === true &&
-      settledQuota?.basic?.used === beforeQuota?.basic?.used &&
+      settledQuota?.basic?.used === (beforeQuota?.basic?.used ?? 0) + 1 &&
+      settledQuota?.basic?.remaining === (beforeQuota?.basic?.remaining ?? 0) - 1 &&
       settledQuota?.basic?.shared === beforeQuota?.basic?.shared &&
-      settledQuota?.pro?.used === beforeQuota?.pro?.used,
+      settledQuota?.pro?.used === (beforeQuota?.pro?.used ?? 0) + 1,
     `basic=${JSON.stringify(settledQuota?.basic)} pro=${JSON.stringify(settledQuota?.pro)}`,
   );
+
+  // ------------------------------------------------------- 续费（表格时长）
+  section('table renewal (表格续费)');
+  const renewalTable = await call('/api/databases', {
+    method: 'POST',
+    body: { name: '续费测试表', kind: 'basic' },
+  });
+  const renewalId = renewalTable.data?.id;
+  const renewalRow = (await call('/api/databases')).data?.databases?.find((item) => item.id === renewalId);
+  check(
+    'a fresh basic table carries its slot expiry',
+    renewalTable.status === 201 &&
+      typeof renewalRow?.slotExpiresAt === 'number' &&
+      renewalRow.slotExpiresAt > Date.now() + 6 * 24 * 60 * 60 * 1000,
+    `expiresAt=${renewalRow?.slotExpiresAt ?? 0}`,
+  );
+
+  // 续费目标的校验：不存在的表格 404、类型对不上 400
+  const unknownRenew = await call('/api/quota/orders', {
+    method: 'POST',
+    body: { kind: 'basic', count: 1, months: 1, databaseId: 'database-does-not-exist' },
+  });
+  check('renewing an unknown table is a 404', unknownRenew.status === 404, `status=${unknownRenew.status}`);
+  const wrongKindRenew = await call('/api/quota/orders', {
+    method: 'POST',
+    body: { kind: 'pro', count: 1, months: 1, databaseId: renewalId },
+  });
+  check('renewing with a mismatched kind is a 400', wrongKindRenew.status === 400, `status=${wrongKindRenew.status}`);
+
+  const renewBefore = (await call('/api/quota')).data?.quota;
+  const renewalOrder = await call('/api/quota/orders', {
+    method: 'POST',
+    body: { kind: 'basic', count: 1, months: 1, databaseId: renewalId },
+  });
+  if (renewalOrder.status === 201) {
+    const renewed = (await call('/api/databases')).data?.databases?.find((item) => item.id === renewalId);
+    check(
+      'renewing extends the table without adding a slot',
+      renewalOrder.data?.purchase?.databaseId === renewalId &&
+        renewalOrder.data?.quota?.basic?.remaining === renewBefore?.basic?.remaining &&
+        renewed?.slotExpiresAt > (renewalRow?.slotExpiresAt ?? 0),
+      `remaining=${renewBefore?.basic?.remaining}->${renewalOrder.data?.quota?.basic?.remaining} expiresAt=${renewalRow?.slotExpiresAt}->${renewed?.slotExpiresAt}`,
+    );
+  } else {
+    // 线上配了真实收款：这一单停在「待支付」，但订单必须记下续费的是哪张表
+    check(
+      'renewing opens a payment order bound to that table',
+      renewalOrder.status === 202 &&
+        renewalOrder.data?.order?.databaseId === renewalId &&
+        Boolean(renewalOrder.data?.pay?.qr),
+      `status=${renewalOrder.status}`,
+    );
+  }
+  const removedRenewalTable = await call(`/api/databases/${renewalId}`, { method: 'DELETE' });
+  check('renewal test table cleaned up', removedRenewalTable.data?.ok === true);
 
   // ------------------------------------------------------------------ cleanup
   // ------------------------------------------------- 改密码（登录后自助修改）
@@ -2568,6 +2625,30 @@ async function main() {
       `member=${memberUser ? 'yes' : 'no'} admin=${adminRow ? 'yes' : 'no'}`,
     );
     check('the admin is flagged in the list', adminRow?.isAdmin === true, `isAdmin=${adminRow?.isAdmin ?? ''}`);
+
+    // 「后台 → 站点设置」里的登录页副标题（`login_tagline`）：改完立即生效，公开接口也能拿到
+    const customTagline = `内部系统 ${Date.now()}`.slice(0, 40);
+    const settingsBefore = await asAdmin('/api/admin/settings');
+    const savedTagline = await asAdmin('/api/admin/settings', {
+      method: 'PATCH',
+      body: { loginTagline: customTagline },
+    });
+    const publicBranding = await call('/api/branding', { cookie: false });
+    check(
+      'the admin can set the login tagline',
+      settingsBefore.status === 200 &&
+        savedTagline.status === 200 &&
+        savedTagline.data?.settings?.loginTagline === customTagline &&
+        savedTagline.data?.branding?.loginTagline === customTagline &&
+        publicBranding.data?.loginTagline === customTagline,
+      `status=${savedTagline.status} tagline=${savedTagline.data?.settings?.loginTagline ?? ''}`,
+    );
+    const clearedTagline = await asAdmin('/api/admin/settings', { method: 'PATCH', body: { loginTagline: '' } });
+    check(
+      'clearing the login tagline falls back to the built-in default',
+      clearedTagline.status === 200 && clearedTagline.data?.settings?.loginTaglineIsDefault === true,
+      `tagline=${clearedTagline.data?.settings?.loginTagline ?? ''}`,
+    );
 
     const renamed = smokeUser
       ? await asAdmin(`/api/admin/users/${smokeUser.id}`, {

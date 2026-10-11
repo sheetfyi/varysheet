@@ -55,6 +55,8 @@ export interface SessionPayload {
   appName: string;
   /** 站点图标地址（管理员上传过才有），侧边栏 / 顶部条 / 登录页的标识区用 */
   siteIconUrl: string | null;
+  /** 登录页副标题（管理员在「后台 → 站点设置」里改），未登录时登录卡片用它 */
+  loginTagline: string;
 }
 
 export interface RecordsPage extends CellEditLocks {
@@ -266,6 +268,8 @@ export const api = {
     adminEmail?: string;
     resendApiKey?: string;
     resendFromEmail?: string;
+    /** 登录页副标题（留空 = 清掉数据库里的值，退回默认文案） */
+    loginTagline?: string;
     /** XorPay 收款（表格名额购买）：填好 appid + app secret 就立刻开启微信扫码下单 */
     xorpayAid?: string;
     xorpayAppSecret?: string;
@@ -333,6 +337,7 @@ export const api = {
    *   - 已开通收款（后台「站点设置」里填了 XorPay appid + app secret）：202 + `pay.qr`，
    *     要等回调 / 查单确认后名额才到账；
    *   - 没开通（本地开发 / CI）：201 + `purchase`，立刻到账。
+   * 带 `databaseId` 时是**续费**某张基础 / 专业表格（不新增名额，只延长这张表的时长）。
    */
   createQuotaOrder: (body: {
     kind: TableKind;
@@ -340,6 +345,8 @@ export const api = {
     months: number;
     payType?: XorpayPayType;
     note?: string;
+    /** 续费哪张表格（表格清单里的「续费」按钮带上它）；不传 = 普通购买 */
+    databaseId?: string;
   }) => json<QuotaOrderResponse>('/api/quota/orders', 'POST', body),
   /** 查一张订单（服务端会顺带向 XorPay 兜底查一次：回调丢了也能补到账） */
   quotaOrder: (id: string) => json<QuotaOrderStatus>(`/api/quota/orders/${encodeURIComponent(id)}`, 'GET'),

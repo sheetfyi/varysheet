@@ -38,10 +38,12 @@ import {
   asString,
   badRequest,
   newId,
+  notFound,
   sqlNumber,
   sqlString,
   type SqlRow,
 } from './http';
+import { renewSlot, resolveRenewTarget } from './slots';
 import { loadSiteSettings } from './settings';
 import {
   notifyUrlOf,
@@ -68,11 +70,17 @@ export interface PurchaseInput {
   count: number;
   months: number;
   note: string;
+  /**
+   * 续费的是哪张表（基础 / 专业表格清单里的「续费」按钮带上它）。
+   * 空串 = 普通购买（增加可添加的名额）；非空 = 只延长这张表的时长，不新增名额。
+   */
+  databaseId: string;
 }
 
 /**
  * 校验一次购买的参数 —— 与接入支付之前的 `purchaseHandler` **逐字一致**
- * （冒烟测试里的 400 断言依赖这些边界：试用表格 400、数量 1 ~ 10、总月数白名单）。
+ * （冒烟测试里的 400 断言依赖这些边界：试用表格 400、数量 1 ~ 10、总月数白名单），
+ * 外加可选的 `databaseId`（续费；存在性 / 归属 / 类型是否匹配由 `createOrderForUser` 校验）。
  */
 export function parsePurchaseInput(body: Record<string, unknown>): PurchaseInput {
   const kind: TableKind = asEnum(body.kind ?? 'basic', PURCHASE_KINDS, '表格类型');
@@ -86,7 +94,8 @@ export function parsePurchaseInput(body: Record<string, unknown>): PurchaseInput
     );
   }
   const note = asString(body.note, '备注', { max: 200 });
-  return { kind, count, months, note };
+  const databaseId = asString(body.databaseId, '续费表格', { max: 64 });
+  return { kind, count, months, note, databaseId };
 }
 
 /** 数据库行 → `TableOrder` */
@@ -99,6 +108,8 @@ export function orderOf(row: SqlRow): TableOrder {
     count: sqlNumber(row, 'count', 1),
     months: sqlNumber(row, 'months', 1),
     amountCents: sqlNumber(row, 'amount_cents'),
+    // 续费哪张表（空串 = 普通购买）：交付时决定「加名额」还是「延长这张表的时长」
+    databaseId: sqlString(row, 'database_id'),
     paidCents: sqlNumber(row, 'paid_cents'),
     status: sqlString(row, 'status', 'pending') as TableOrderStatus,
     payType: sqlString(row, 'pay_type') as XorpayPayType | '',
@@ -112,7 +123,7 @@ export function orderOf(row: SqlRow): TableOrder {
 }
 
 const ORDER_COLUMNS = `id, user_id, kind, count, months, amount_cents, paid_cents, status, pay_type,
-  channel, aoid, qr, purchase_id, expires_at, paid_at, created_at`;
+  channel, aoid, qr, purchase_id, database_id, expires_at, paid_at, created_at`;
 
 /** 按订单号读一行（`userId` 传了就顺带校验归属，防止越权看别人的订单） */
 export async function loadOrderRow(env: Env, orderId: string, userId?: string): Promise<SqlRow | null> {
@@ -140,14 +151,16 @@ async function insertPurchase(
     note: string;
     createdBy: string;
     orderId?: string;
+    /** 续费哪张表；空串 = 新增名额的流水（名额统计只看这些行，见 routes/quota.ts） */
+    databaseId?: string;
     createdAt: number;
   },
 ): Promise<string> {
   const id = newId();
   await env.DB.prepare(
     `INSERT OR IGNORE INTO table_purchases
-       (id, user_id, kind, count, months, amount_cents, channel, note, created_by, created_at, order_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, user_id, kind, count, months, amount_cents, channel, note, created_by, created_at, order_id, database_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
     .bind(
       id,
@@ -161,6 +174,7 @@ async function insertPurchase(
       input.createdBy,
       input.createdAt,
       input.orderId ?? '',
+      input.databaseId ?? '',
     )
     .run();
   return id;
@@ -188,6 +202,15 @@ export async function createOrderForUser(
 ): Promise<CreatedOrder> {
   const amountCents = purchaseAmountCents(input.kind, input.count, input.months);
   if (amountCents <= 0) throw badRequest('这一类表格不单卖（试用表格是免费赠送的）');
+  // 续费（`databaseId` 非空）：必须是自己的一张基础 / 专业表格，类型对得上，一次只续一张
+  const renewTarget = input.databaseId ? await resolveRenewTarget(env, user.id, input.databaseId) : null;
+  if (input.databaseId) {
+    if (!renewTarget) throw notFound('要续费的表格不存在或不属于你');
+    if (renewTarget.kind !== input.kind) {
+      throw badRequest(`这张表是${tableKindLabel(renewTarget.kind)}，续费时表格类型要对得上`);
+    }
+    if (input.count !== 1) throw badRequest('续费一次只能续 1 张表格');
+  }
   const now = Date.now();
   const orderId = newOrderId();
   const config = options.config ?? (await loadXorpayConfig(env));
@@ -197,10 +220,22 @@ export async function createOrderForUser(
     await env.DB.prepare(
       `INSERT INTO table_orders
          (id, user_id, kind, count, months, amount_cents, paid_cents, status, pay_type, channel,
-          aoid, qr, transaction_id, buyer, notify_raw, purchase_id, expires_at, paid_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'paid', '', 'self-serve', '', '', '', '', '', '', 0, ?, ?, ?)`,
+          aoid, qr, transaction_id, buyer, notify_raw, purchase_id, database_id, expires_at, paid_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'paid', '', 'self-serve', '', '', '', '', '', '', ?, 0, ?, ?, ?)`,
     )
-      .bind(orderId, user.id, input.kind, input.count, input.months, amountCents, amountCents, now, now, now)
+      .bind(
+        orderId,
+        user.id,
+        input.kind,
+        input.count,
+        input.months,
+        amountCents,
+        amountCents,
+        input.databaseId,
+        now,
+        now,
+        now,
+      )
       .run();
     const purchaseId = await insertPurchase(env, {
       userId: user.id,
@@ -212,8 +247,18 @@ export async function createOrderForUser(
       note: input.note,
       createdBy: user.id,
       orderId,
+      databaseId: input.databaseId,
       createdAt: now,
     });
+    // 续费：钱到位就把这张表的到期时间往后推（不新增名额，见 worker/slots.ts）
+    if (renewTarget) {
+      await renewSlot(env, {
+        userId: user.id,
+        databaseId: renewTarget.databaseId,
+        kind: input.kind,
+        months: input.months,
+      });
+    }
     await env.DB.prepare('UPDATE table_orders SET purchase_id = ?, updated_at = ? WHERE id = ?')
       .bind(purchaseId, Date.now(), orderId)
       .run();
@@ -228,6 +273,7 @@ export async function createOrderForUser(
         months: input.months,
         amountCents,
         channel: 'self-serve',
+        databaseId: input.databaseId,
         note: input.note,
         createdAt: now,
       },
@@ -255,17 +301,32 @@ export async function createOrderForUser(
   const expiresAt = now + ORDER_TTL_MINUTES * 60 * 1000;
   await env.DB.prepare(
     `INSERT INTO table_orders
-       (id, user_id, kind, count, months, amount_cents, status, pay_type, channel, expires_at, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, 'xorpay', ?, ?, ?)`,
+       (id, user_id, kind, count, months, amount_cents, status, pay_type, channel, database_id,
+        expires_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, 'xorpay', ?, ?, ?, ?)`,
   )
-    .bind(orderId, user.id, input.kind, input.count, input.months, amountCents, payType, expiresAt, now, now)
+    .bind(
+      orderId,
+      user.id,
+      input.kind,
+      input.count,
+      input.months,
+      amountCents,
+      payType,
+      input.databaseId,
+      expiresAt,
+      now,
+      now,
+    )
     .run();
 
   try {
     const created = await xorpayCreateOrder(config, {
       payType,
-      // 商品名会显示在微信的账单上，写清楚「买了什么」
-      name: `${tableKindLabel(input.kind)}名额 × ${input.count}（${purchaseMonthsLabel(input.months)}）`,
+      // 商品名会显示在微信的账单上，写清楚「买了什么」（续费会注明是续费）
+      name: renewTarget
+        ? `${tableKindLabel(input.kind)}续费 × ${input.count}（${purchaseMonthsLabel(input.months)}）`
+        : `${tableKindLabel(input.kind)}名额 × ${input.count}（${purchaseMonthsLabel(input.months)}）`,
       amountCents,
       orderId,
       // order_uid 是可选参数，用来在 XorPay 后台看清是谁下的单
@@ -339,11 +400,25 @@ export async function deliverOrder(
     months: order.months,
     amountCents: order.amountCents,
     channel,
-    note: paid.source === 'notify' ? '支付到账（XorPay 回调）' : '支付到账（主动查单确认）',
+    note: order.databaseId
+      ? '续费到账'
+      : paid.source === 'notify'
+        ? '支付到账（XorPay 回调）'
+        : '支付到账（主动查单确认）',
     createdBy: order.userId,
     orderId: order.id,
+    databaseId: order.databaseId,
     createdAt: now,
   });
+  // 续费单：交付时把这张表的到期时间往后推（不新增名额，流水已带 database_id 供对账）
+  if (order.databaseId) {
+    await renewSlot(env, {
+      userId: order.userId,
+      databaseId: order.databaseId,
+      kind: order.kind,
+      months: order.months,
+    });
+  }
   await env.DB.prepare('UPDATE table_orders SET purchase_id = ?, updated_at = ? WHERE id = ?')
     .bind(purchaseId, now, order.id)
     .run();
@@ -369,11 +444,21 @@ async function healPaidOrder(env: Env, row: SqlRow): Promise<void> {
           order.channel === 'self-serve'
             ? 'self-serve'
             : `${order.channel || 'xorpay'}:${order.payType || 'native'}`,
-        note: '支付到账（补记）',
+        note: order.databaseId ? '续费到账（补记）' : '支付到账（补记）',
         createdBy: order.userId,
         orderId: order.id,
+        databaseId: order.databaseId,
         createdAt: Date.now(),
       });
+  // 补记的是续费单：把这张表的到期时间也一并推后（漏交付时自愈）
+  if (order.databaseId && !existing) {
+    await renewSlot(env, {
+      userId: order.userId,
+      databaseId: order.databaseId,
+      kind: order.kind,
+      months: order.months,
+    });
+  }
   await env.DB.prepare('UPDATE table_orders SET purchase_id = ?, updated_at = ? WHERE id = ?')
     .bind(purchaseId, Date.now(), order.id)
     .run();
@@ -499,6 +584,8 @@ export async function grantQuota(
     months: input.months,
     amountCents,
     channel: 'admin-grant',
+    // 管理员赠额永远是「新增名额」，不牵扯具体表格的续费
+    databaseId: '',
     note: input.note,
     createdAt: now,
   };

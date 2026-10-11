@@ -16,6 +16,8 @@ import {
 import {
   MAX_PURCHASE_COUNT,
   quotaSetFromUsed,
+  slotExpiryText,
+  slotRenewable,
   TABLE_QUOTA_RULES,
   tableQuotaHasRoom,
   tableQuotaRemaining,
@@ -100,12 +102,15 @@ interface SidebarProps {
   /**
    * 购买表格名额（说明弹窗里的「去支付」）：由 App 下单并刷新名额。
    * 开通了收款时返回带支付二维码的响应（弹窗自己显示二维码 + 轮询）；没开通则立刻到账。
+   * 带 `databaseId` = 给这张基础 / 专业表格**续费**（价格与支付规则和购买相同，
+   * 但不增加可添加的名额，只延长这张表的时长）。
    */
   onOrderQuota: (input: {
     kind: TableKind;
     count: number;
     months: number;
     payType: XorpayPayType;
+    databaseId?: string;
   }) => Promise<QuotaOrderResponse>;
   /** 轮询查单（App 透传 `GET /api/quota/orders/:id`） */
   onCheckQuotaOrder: (id: string) => Promise<QuotaOrderStatus>;
@@ -276,6 +281,15 @@ function CapacityPanel({
 }
 
 /**
+ * 这张表该不该显示「续费」：自己拥有的基础 / 专业表格、且时长进入最后一周
+ * （`SLOT_RENEW_WINDOW_DAYS`，见 shared/quota.ts）。试用表格不出售、没有时长，不显示。
+ * 时长数据来自服务端下发的 `slotExpiresAt`（`GET /api/databases`，见 worker/slots.ts）。
+ */
+function canRenewSlot(database: DatabaseSummary): boolean {
+  return database.role === 'owner' && database.kind !== 'trial' && slotRenewable(database.slotExpiresAt ?? 0);
+}
+
+/**
  * 列表里的「试用 / 基础 / 专业」徽标：同时也是这张表的**容量入口**。
  *
  * 按需求去掉了行尾的硬盘图标（💾），改由徽标承担：点一下弹出容量明细
@@ -357,6 +371,7 @@ function KindCapacityTag({
 function QuotaDialog({
   quota,
   payment,
+  renew,
   onClose,
   onOrder,
   onCheckOrder,
@@ -365,17 +380,24 @@ function QuotaDialog({
   quota: TableQuotaSet;
   /** 收款是否已开通（`GET /api/quota` 下发）：决定显示「微信扫码」还是「立即到账」 */
   payment: TableQuotaPayment | null;
+  /**
+   * 续费模式：给这张已有的基础 / 专业表格续时长（表格清单里的「续费」按钮打开）。
+   * 有值时类型与数量都锁死（type 跟着这张表、一次只续 1 张），价格与支付规则和购买完全相同。
+   */
+  renew: { id: string; name: string; kind: TableKind } | null;
   onClose: () => void;
   onOrder: (input: {
     kind: TableKind;
     count: number;
     months: number;
     payType: XorpayPayType;
+    /** 续费哪张表格（不传 = 普通购买） */
+    databaseId?: string;
   }) => Promise<QuotaOrderResponse>;
   onCheckOrder: (id: string) => Promise<QuotaOrderStatus>;
   onPaid: (quota: TableQuotaSet) => void;
 }) {
-  const [kind, setKind] = useState<TableKind>('basic');
+  const [kind, setKind] = useState<TableKind>(renew?.kind ?? 'basic');
   const [count, setCount] = useState(1);
   /** 支付方式：只开微信时（默认）不显示下拉，直接按微信扫码走 */
   const [payType, setPayType] = useState<XorpayPayType>('native');
@@ -392,13 +414,16 @@ function QuotaDialog({
   const [unitCount, setUnitCount] = useState(1);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const meta = tableKindMeta(kind);
+  const meta = tableKindMeta(renew?.kind ?? kind);
+  /** 续费一次只续 1 张、类型跟着这张表；普通购买时用用户选的 */
+  const effectiveKind = renew?.kind ?? kind;
+  const effectiveCount = renew ? 1 : count;
   /** 当前选中的时长单位：「时长数量」的可选范围与文案都跟着它走 */
   const unit = purchaseUnitOf(unitKey);
   /** 总购买时长（月）= 时长单位 × 时长数量；服务端按它算价（`purchaseMonthsOf`） */
   const months = purchaseMonthsOf(unitKey, unitCount);
   /** 这一单的应付金额（分）：与 service 端同一口径（`tableKind.ts` 的 `purchaseAmountCents`） */
-  const amountCents = purchaseAmountCents(kind, count, months);
+  const amountCents = purchaseAmountCents(effectiveKind, effectiveCount, months);
   /** 收款是否已开通 + 开了哪些通道（服务端下发；没拿到就按「没开通」显示，宁可少承诺） */
   const paymentEnabled = payment?.enabled === true;
   const payTypes = payment?.methods?.length ? payment.methods : (['native'] as XorpayPayType[]);
@@ -458,7 +483,14 @@ function QuotaDialog({
     setBusy(true);
     setError('');
     try {
-      const result = await onOrder({ kind, count, months, payType });
+      const result = await onOrder({
+        kind: effectiveKind,
+        count: effectiveCount,
+        months,
+        payType,
+        // 续费：告诉服务端续哪张表（不新增名额，只把这张表的到期时间往后推）
+        ...(renew ? { databaseId: renew.id } : {}),
+      });
       if (result.purchase) {
         // 没开通收款（本地 / CI）：后端已经到账，行为和接入前一样
         onClose();
@@ -483,13 +515,20 @@ function QuotaDialog({
   };
 
   return (
-    <Modal title="表格数量说明" onClose={onClose}>
-      {TABLE_KINDS.map((item) =>
-        quota[item] ? (
-          <p className="small muted quota-current" key={item}>
-            {tableQuotaSummary(quota[item])}
-          </p>
-        ) : null,
+    <Modal title={renew ? `续费「${renew.name}」` : '表格数量说明'} onClose={onClose}>
+      {renew ? (
+        <p className="small muted quota-current">
+          这张表是{tableKindMeta(renew.kind).label}：续费和购买同价、同样走支付流程，
+          只把它的使用时长往后推（不会增加可添加的表格名额）。
+        </p>
+      ) : (
+        TABLE_KINDS.map((item) =>
+          quota[item] ? (
+            <p className="small muted quota-current" key={item}>
+              {tableQuotaSummary(quota[item])}
+            </p>
+          ) : null,
+        )
       )}
 
       <ul className="quota-rule-list">
@@ -525,18 +564,23 @@ function QuotaDialog({
       <div className="quota-buy">
         <label className="field">
           <span>表格类型</span>
-          {/* 试用表格是免费送的、不卖，所以这里只列可以购买的两类 */}
-          <select
-            className="input"
-            value={kind}
-            onChange={(event) => setKind(asTableKind(event.target.value))}
-          >
-            {BUYABLE_TABLE_KINDS.map((item) => (
-              <option key={item} value={item}>
-                {tableKindMeta(item).label}
-              </option>
-            ))}
-          </select>
+          {renew ? (
+            /* 续费：类型跟着这张表走，不能改 */
+            <input className="input" value={tableKindMeta(renew.kind).label} readOnly />
+          ) : (
+            /* 试用表格是免费送的、不卖，所以这里只列可以购买的两类 */
+            <select
+              className="input"
+              value={kind}
+              onChange={(event) => setKind(asTableKind(event.target.value))}
+            >
+              {BUYABLE_TABLE_KINDS.map((item) => (
+                <option key={item} value={item}>
+                  {tableKindMeta(item).label}
+                </option>
+              ))}
+            </select>
+          )}
         </label>
         <label className="field">
           <span>时长单位</span>
@@ -562,13 +606,18 @@ function QuotaDialog({
         </label>
         <label className="field">
           <span>购买数量</span>
-          <select className="input" value={count} onChange={(event) => setCount(Number(event.target.value))}>
-            {Array.from({ length: MAX_PURCHASE_COUNT }, (_, index) => index + 1).map((value) => (
-              <option key={value} value={value}>
-                {value} 个表格
-              </option>
-            ))}
-          </select>
+          {renew ? (
+            /* 续费一次只续这张表 */
+            <input className="input" value="1 张表格" readOnly />
+          ) : (
+            <select className="input" value={count} onChange={(event) => setCount(Number(event.target.value))}>
+              {Array.from({ length: MAX_PURCHASE_COUNT }, (_, index) => index + 1).map((value) => (
+                <option key={value} value={value}>
+                  {value} 个表格
+                </option>
+              ))}
+            </select>
+          )}
         </label>
         {/* 只开了一条通道（默认只开微信）时不显示下拉，避免多一个没有意义的选择 */}
         {payTypes.length > 1 ? (
@@ -588,12 +637,22 @@ function QuotaDialog({
           </label>
         ) : null}
         <button type="button" className="btn primary" disabled={busy || pending !== null} onClick={() => void submit()}>
-          {busy ? '下单中…' : pending ? '等待支付…' : paymentEnabled ? '去支付（微信扫码）' : '立即添加'}
+          {busy
+            ? '下单中…'
+            : pending
+              ? '等待支付…'
+              : renew
+                ? paymentEnabled
+                  ? '去支付（续费）'
+                  : '立即续费'
+                : paymentEnabled
+                  ? '去支付（微信扫码）'
+                  : '立即添加'}
         </button>
       </div>
 
-      {/* 价格明细：`9.9 元/月 × 2 个 × 12 个月 = 237.6 元` */}
-      <p className="quota-price">价格：{purchasePriceText(kind, count, months)}</p>
+      {/* 价格明细：`9.9 元/月 × 2 个 × 12 个月 = 237.6 元`（续费和购买同一套价格口径） */}
+      <p className="quota-price">价格：{purchasePriceText(effectiveKind, effectiveCount, months)}</p>
 
       {/* 待支付：微信支付二维码 + 每 3 秒轮询到账（开通收款时才有） */}
       {pending ? (
@@ -616,9 +675,11 @@ function QuotaDialog({
 
       {/* 一句话收尾：买完的效果 + 支付口径（细则都在上面的规则列表里，不再重复） */}
       <p className="small muted">
-        {paymentEnabled
-          ? `买几个就多几个可添加的${meta.label}名额（${tableKindCapacityText(kind)}）；点「去支付」扫码付款，付完名额自动到账。`
-          : `买几个就多几个可添加的${meta.label}名额（${tableKindCapacityText(kind)}）；管理员还没开通在线收款，点「立即添加」会立刻生效并记一条流水。`}
+        {renew
+          ? '续费只把这张表的使用时长往后推，不增加可添加的表格名额；删掉的表格也不会因此回来。'
+          : paymentEnabled
+            ? `买几个就多几个可添加的${meta.label}名额（${tableKindCapacityText(effectiveKind)}）；点「去支付」扫码付款，付完名额自动到账。`
+            : `买几个就多几个可添加的${meta.label}名额（${tableKindCapacityText(effectiveKind)}）；管理员还没开通在线收款，点「立即添加」会立刻生效并记一条流水。`}
       </p>
       {error ? <p className="error small">{error}</p> : null}
     </Modal>
@@ -680,6 +741,15 @@ export function Sidebar({
   const [error, setError] = useState('');
   /** 「表格数量说明」弹窗：点「你有 N 个表格可以添加」里的 N 打开 */
   const [quotaOpen, setQuotaOpen] = useState(false);
+  /**
+   * 续费模式：点清单里某张表的「续费」时记下它，弹窗改用续费文案并锁定类型 / 数量。
+   * 关闭弹窗时一起清掉（下次从「N 个表格可添加」打开就是普通购买）。
+   */
+  const [renewTarget, setRenewTarget] = useState<{ id: string; name: string; kind: TableKind } | null>(null);
+  const closeQuota = useCallback(() => {
+    setQuotaOpen(false);
+    setRenewTarget(null);
+  }, []);
   /** 只通过视图定向分享拿到的表格：只出现在「分享表格」里，不再混进「我的表格」 */
   const sharedDatabases = databases.filter((database) => database.viewScoped);
   const myDatabases = databases.filter((database) => !database.viewScoped);
@@ -753,7 +823,14 @@ export function Sidebar({
         <div className="sidebar-add-row">
           <p className="sidebar-add-note">
             你有
-            <QuotaCountButton remaining={addableTotal} onOpen={() => setQuotaOpen(true)} />
+            <QuotaCountButton
+              remaining={addableTotal}
+              onOpen={() => {
+                // 从名额数字进来 = 普通购买（不是给某张表续费）
+                setRenewTarget(null);
+                setQuotaOpen(true);
+              }}
+            />
             个表格可
           </p>
           <button
@@ -836,6 +913,31 @@ export function Sidebar({
               <span className="label">{database.name}</span>
               {/* 类型徽标兼容量入口：点它弹出「记录 / 附件」明细（原来的硬盘图标已按需求去掉） */}
               <KindCapacityTag name={database.name} kind={database.kind} capacity={database.capacity} />
+              {/* 时长进入最后一周（≤ 7 天）的续费入口：价格与支付规则和购买完全相同 */}
+              {canRenewSlot(database) ? (
+                <span
+                  className="kind-tag renew-tag"
+                  role="button"
+                  tabIndex={0}
+                  title={`${slotExpiryText(database.slotExpiresAt ?? 0)}，点这里续费`}
+                  aria-label={`续费「${database.name}」`}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setRenewTarget({ id: database.id, name: database.name, kind: database.kind });
+                    setQuotaOpen(true);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key !== 'Enter' && event.key !== ' ') return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setRenewTarget({ id: database.id, name: database.name, kind: database.kind });
+                    setQuotaOpen(true);
+                  }}
+                >
+                  续费
+                </span>
+              ) : null}
               {database.locked ? (
                 <span className="small muted" title="结构已锁定">
                   🔒
@@ -919,9 +1021,12 @@ export function Sidebar({
 
       {quotaOpen ? (
         <QuotaDialog
+          /* 续费目标变了要重建弹窗：类型 / 数量这些初始 state 跟着它走 */
+          key={renewTarget?.id ?? 'buy'}
           quota={quotaView}
           payment={payment}
-          onClose={() => setQuotaOpen(false)}
+          renew={renewTarget}
+          onClose={closeQuota}
           onOrder={onOrderQuota}
           onCheckOrder={onCheckQuotaOrder}
           onPaid={onQuotaPaid}

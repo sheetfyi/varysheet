@@ -3,16 +3,19 @@
  *
  * 侧边栏「你有 N 个表格可添加」、说明弹窗与购买都用它，口径与 `src/shared/quota.ts`
  * 保持一致：
- *   - 已用 = 自己拥有的、未归档的、这一类型的表格数；
+ *   - 已用 = 自己拥有的、未归档的、这一类型的表格数 **+ 删表时把名额带走的基础 / 专业表格数**
+ *     （`table_slot_consumptions`，见 `worker/slots.ts`；试用表格删掉会退还名额，不记账）；
  *   - 赠额：只有试用表格有 —— 成功邀请新用户注册得到的赠额（`trial_table_grants`，
  *     每邀请一位新用户 +1）；基础表格与专业表格都没有赠额（**分享也不加**，只能购买）；
- *   - 已购买 = `table_purchases` 里这一类型的 count 之和（试用表格不卖，恒为 0）；
+ *   - 已购买 = `table_purchases` 里这一类型**新增名额**的 count 之和
+ *     （试用表格不卖恒为 0；`database_id` 非空的续费流水不算新增名额，见下）；
  *   - 默认名额：试用 1（新注册就送一张免费试用表）、基础 / 专业 0。
  *
  * 购买走订单（见 `src/worker/orders.ts` 与 docs/payment-xorpay.md）：
- *   - `POST /api/quota/orders`（推荐，前端在用）：body `{ kind, count, months, payType? }` →
+ *   - `POST /api/quota/orders`（推荐，前端在用）：body `{ kind, count, months, payType?, databaseId? }` →
  *     开通了收款就返回微信支付二维码（202 + `pay.qr`），等回调 / 查单确认后才加名额；
  *     没开通收款（后台「站点设置」里没填 XorPay appid / secret）则立刻到账（201 + `purchase`）；
+ *     `databaseId` 非空 = 给这张基础 / 专业表格**续费**（不新增名额，只延长它的时长）；
  *   - `POST /api/quota/purchases`（老接口，保留兼容）：同一套逻辑的简写，响应结构一并保留。
  *
  * `months` 是**总时长**（时长单位「月」× 数量 1 ~ 12，或时长单位「年」× 数量 1 ~ 5 → 1 ~ 60 个月，
@@ -27,6 +30,7 @@ import { createOrderForUser, loadXorpayConfig, parsePurchaseInput } from '../ord
 import { xorpayConfigured } from '../xorpay';
 import type { Env, RequestContext, Route } from '../types';
 import { forEachShardSafe } from '../shards';
+import { countConsumedSlots } from '../slots';
 import { countInviteTrialGrants } from '../trialGrants';
 
 /**
@@ -70,18 +74,20 @@ export async function loadTableQuota(env: Env, userId: string): Promise<TableQuo
     for (const column of QUOTA_COUNT_COLUMNS) counts[column] += sqlNumber(scan.value, column);
   }
 
-  const [purchaseRow, invitedGrants] = await Promise.all([
+  const [purchaseRow, invitedGrants, consumed] = await Promise.all([
     env.DB.prepare(
       `SELECT
          (SELECT COALESCE(SUM(p.count), 0) FROM table_purchases p
-           WHERE p.user_id = ? AND p.kind = 'basic') AS bought_basic,
+           WHERE p.user_id = ? AND p.kind = 'basic' AND p.database_id = '') AS bought_basic,
          (SELECT COALESCE(SUM(p.count), 0) FROM table_purchases p
-           WHERE p.user_id = ? AND p.kind = 'pro') AS bought_pro`,
+           WHERE p.user_id = ? AND p.kind = 'pro' AND p.database_id = '') AS bought_pro`,
     )
       .bind(userId, userId)
       .first<SqlRow>(),
     // 试用名额的赠额在用户库：每成功邀请一位新用户注册写一行（见 worker/trialGrants.ts）
     countInviteTrialGrants(env, userId),
+    // 删表带走的名额：基础 / 专业表格删掉不退还（见 worker/slots.ts；试用表格不记账）
+    countConsumedSlots(env, userId),
   ]);
 
   return tableQuotaSetOf({
@@ -93,13 +99,13 @@ export async function loadTableQuota(env: Env, userId: string): Promise<TableQuo
     },
     basic: {
       // 基础表格没有赠额：分享不再加名额（口径见 shared/quota.ts），名额只能购买
-      used: counts.used_basic,
+      used: counts.used_basic + consumed.basic,
       shared: 0,
       purchased: sqlNumber(purchaseRow ?? {}, 'bought_basic'),
     },
     pro: {
       // 专业表格的名额也只看购买：分享不再 +1（口径见 shared/quota.ts）
-      used: counts.used_pro,
+      used: counts.used_pro + consumed.pro,
       shared: 0,
       purchased: sqlNumber(purchaseRow ?? {}, 'bought_pro'),
     },

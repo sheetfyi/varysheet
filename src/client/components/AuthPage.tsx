@@ -1,12 +1,18 @@
 import { useEffect, useRef, useState } from 'react';
 import type { RegistrationPending, SessionUser } from '../../shared/types';
 import { ApiError, api } from '../api';
+import { DEFAULT_LOGIN_TAGLINE } from '../branding';
 import { confirmSessionLanded } from '../lib/session';
 
 interface AuthPageProps {
   appName: string;
   /** 站点图标（管理员上传过才有）：登录 / 注册卡片顶部跟着站点名称一起显示 */
   siteIconUrl: string | null;
+  /**
+   * 登录卡片上的那句说明（管理员在「后台 → 站点设置」里改）。
+   * 留空时用 `DEFAULT_LOGIN_TAGLINE`，注册模式那句是固定文案。
+   */
+  loginTagline: string;
   onAuthenticated: (user: SessionUser) => void;
 }
 
@@ -23,7 +29,7 @@ function BrandHead({ appName, siteIconUrl }: { appName: string; siteIconUrl: str
   );
 }
 
-export function AuthPage({ appName, siteIconUrl, onAuthenticated }: AuthPageProps) {
+export function AuthPage({ appName, siteIconUrl, loginTagline, onAuthenticated }: AuthPageProps) {
   const [mode, setMode] = useState<'login' | 'register'>('login');
   /** 注册是两步：先填资料（form），再填邮件里的确认码（code） */
   const [step, setStep] = useState<'form' | 'code'>('form');
@@ -208,7 +214,9 @@ export function AuthPage({ appName, siteIconUrl, onAuthenticated }: AuthPageProp
     <div className="centered">
       <form className="auth-card" onSubmit={submit}>
         <BrandHead appName={appName} siteIconUrl={siteIconUrl} />
-        <p className="muted">{mode === 'login' ? '登录以继续你的表格' : '创建账号，开始搭建你的数据库'}</p>
+        <p className="muted">
+          {mode === 'login' ? loginTagline.trim() || DEFAULT_LOGIN_TAGLINE : '创建账号，开始搭建你的数据库'}
+        </p>
 
         {mode === 'register' ? (
           <label className="field">

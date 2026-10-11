@@ -670,6 +670,28 @@ textarea.input {
   color: var(--accent);
 }
 
+/*
+  「续费」徽标（表格清单里，基础 / 专业表格的时长进入最后一周时出现，见 Sidebar.tsx 的 canRenewSlot）：
+  做成可点的小标签：实心强调色 + 悬停加深，和只读的类型徽标区分开。
+*/
+.kind-tag.renew-tag {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.kind-tag.renew-tag:hover {
+  border-color: #1b6fd4;
+  background: #1b6fd4;
+}
+
+.kind-tag.renew-tag:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 /* 表格页 / 公开链接页顶部的提示条：已到上限，只能查看和查询 */
 .capacity-notice {
   margin: 0;

@@ -15,6 +15,7 @@
  * `purchaseMonthsOf`）；服务端只认 `PURCHASE_MONTH_OPTIONS` 里那几档月数。
  */
 import {
+  DAY_MS,
   MAX_PURCHASE_MONTHS,
   MIN_PURCHASE_MONTHS,
   asTableKind,
@@ -39,6 +40,45 @@ export const MAX_PURCHASE_COUNT = 10;
 export const QUOTA_EXCEEDED = 'quota_exceeded';
 
 /**
+ * 「续费」按钮出现的窗口（天）：基础 / 专业表格的剩余时长不多于这么多天时，
+ * 表格清单里这张表后面会出现「续费」（见 `src/worker/slots.ts` 的 `table_slot_allocations`）。
+ */
+export const SLOT_RENEW_WINDOW_DAYS = 7;
+
+/**
+ * 从某个时刻起往后推若干个月（只用 UTC 字段算，避开本地时区差异）。
+ * 月末的进位按「不越过月底」处理：1 月 31 日 + 1 个月 = 2 月 28/29 日（与常见订阅口径一致）。
+ */
+export function addMonths(at: number, months: number, fallback = Date.now()): number {
+  const base = Number.isFinite(at) && at > 0 ? at : fallback;
+  const count = Number.isFinite(months) ? Math.trunc(months) : 0;
+  const date = new Date(base);
+  const day = date.getUTCDate();
+  date.setUTCDate(1);
+  date.setUTCMonth(date.getUTCMonth() + count);
+  const lastDay = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0)).getUTCDate();
+  date.setUTCDate(Math.min(day, lastDay));
+  return date.getTime();
+}
+
+/**
+ * 这张表该不该显示「续费」：有时长记录（`expiresAt > 0`）且剩余不超过
+ * `SLOT_RENEW_WINDOW_DAYS` 天（已经过期同样算 —— 过期的表更要续）。
+ */
+export function slotRenewable(expiresAt: number, now = Date.now()): boolean {
+  if (!Number.isFinite(expiresAt) || expiresAt <= 0) return false;
+  return expiresAt - now <= SLOT_RENEW_WINDOW_DAYS * DAY_MS;
+}
+
+/** 「有效期至 2026-11-11（还剩 23 天）」/「有效期至 2026-11-11（已过期）」：清单里悬停提示用 */
+export function slotExpiryText(expiresAt: number, now = Date.now()): string {
+  if (!Number.isFinite(expiresAt) || expiresAt <= 0) return '';
+  const date = new Date(expiresAt).toISOString().slice(0, 10);
+  const days = Math.ceil((expiresAt - now) / DAY_MS);
+  return `有效期至 ${date}（${days > 0 ? `还剩 ${days} 天` : '已过期'}）`;
+}
+
+/**
  * 名额规则：侧边栏的说明弹窗原样展示，改口径时只改这里。
  *
  * 文案要求「一行一条、能扫读」：每条只说一件事，容量 / 保留期这类细节交给下面的对比表，
@@ -46,10 +86,12 @@ export const QUOTA_EXCEEDED = 'quota_exceeded';
  */
 export const TABLE_QUOTA_RULES: string[] = [
   '名额分三类独立计算：试用表格、基础表格、专业表格。',
-  `试用表格：注册送 ${BASE_TABLE_QUOTA.trial} 个，每邀请一位新用户注册 +${INVITE_TRIAL_TABLE_QUOTA} 个，不出售。`,
+  `试用表格：注册送 ${BASE_TABLE_QUOTA.trial} 个，每邀请一位新用户注册 +${INVITE_TRIAL_TABLE_QUOTA} 个，不出售；删掉试用表格会把名额还回来。`,
   `基础表格：无赠送，只能购买，${tableKindPriceText('basic')}；分享不增加名额。`,
   `专业表格：无赠送，只能购买，${tableKindPriceText('pro')}；分享不增加名额。`,
+  '基础表格与专业表格：删掉表格会把那个名额一起带走（名额不退还，已付的钱也不退）。',
   `购买时长 = 单位（月 1 个月 / 年 12 个月）× 数量（月 1 ~ 12，年 1 ~ 5），总时长 ${MIN_PURCHASE_MONTHS} ~ ${MAX_PURCHASE_MONTHS} 个月；金额 = 月单价 × 表格数量 × 总月数。`,
+  `基础表格与专业表格自带时长（从建表时的购买时长起算）：剩余不到 ${SLOT_RENEW_WINDOW_DAYS} 天时表格清单里会出现「续费」，续费和购买同价、同样走扫码支付。`,
 ];
 
 function countOf(value: number | undefined): number {

@@ -13,6 +13,12 @@ import { api } from './api';
 /** 站点名称的兜底值（与 `src/worker/settings.ts` 的默认值保持一致） */
 export const DEFAULT_SITE_NAME = 'Varysheet';
 
+/**
+ * 登录页副标题的兜底值（与 `src/worker/settings.ts` 的 `DEFAULT_LOGIN_TAGLINE` 一致）：
+ * 管理员没在「后台 → 站点设置」里改过时显示这句。
+ */
+export const DEFAULT_LOGIN_TAGLINE = '登录以继续你的表格';
+
 /** favicon 用同一个 `<link rel="icon">` 元素反复更新；地址里的 `?v=` 由服务端带上，换图标即换地址。 */
 function setFavicon(href: string | null): void {
   const existing = document.querySelector<HTMLLinkElement>('link[rel~="icon"]');
