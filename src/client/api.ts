@@ -26,6 +26,7 @@ import type {
   InviteAcceptResponse,
   InviteDetail,
   LoginResponse,
+  PasswordResetRequested,
   Property,
   PropertyConfig,
   PublicDatabaseResponse,
@@ -245,6 +246,17 @@ export const api = {
   /** 登录后自助改密码（其它设备的会话会立即失效） */
   changePassword: (body: { currentPassword: string; newPassword: string }) =>
     json<{ ok: true; sessionsRevoked: boolean }>('/api/auth/password', 'POST', body),
+
+  /**
+   * 找回密码（登录页「忘记密码？找回密码」）：系统生成一个**临时密码**换掉旧密码、
+   * 作废该账号的全部会话，并把新密码邮件发给本人（口径与管理端重置密码一致）。
+   *
+   * 邮箱不存在时服务端返回 404 `email_not_found`，提示文案就是
+   * 「这个邮箱不存在，请确认是否正确！」（直接展示 `ApiError.message`）；
+   * 没配邮件服务或收件人是保留测试域时，临时密码会回显在 `devPassword` 里。
+   */
+  requestPasswordReset: (body: { email: string }) =>
+    json<PasswordResetRequested>('/api/auth/password-reset', 'POST', body),
 
   /* -------------------------------------------------------------- 管理后台 */
   adminListUsers: (params?: { search?: string; limit?: number; offset?: number }) => {

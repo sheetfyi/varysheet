@@ -909,6 +909,24 @@ export interface VerifyRegistrationResponse {
   session?: SessionToken;
 }
 
+/**
+ * 「忘记密码 → 找回密码」（`POST /api/auth/password-reset`）的响应：
+ * 系统生成一个临时密码直接换掉旧密码，并让该账号在所有设备上下线。
+ *
+ * `devPassword` 只在**没真的发邮件**时出现（没配邮件服务，或收件人是保留测试域，
+ * 口径同注册确认码的 `devCode`），方便本地开发与冒烟测试用这个密码登录。
+ */
+export interface PasswordResetRequested {
+  ok: true;
+  email: string;
+  /** 是否真把临时密码邮件发了出去 */
+  emailed: boolean;
+  /** 该账号的所有会话是否已被作废（需要重新登录） */
+  sessionsRevoked: boolean;
+  /** 仅在没发信时回显的临时密码（测试环境专用） */
+  devPassword?: string;
+}
+
 /** 管理员批量删除用户的结果（`POST /api/admin/users/delete`）。 */
 export interface AdminDeleteUsersResponse {
   ok: true;

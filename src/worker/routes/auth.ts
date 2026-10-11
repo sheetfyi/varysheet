@@ -6,16 +6,22 @@
  *   2. `POST /api/auth/register/verify` → 201 `{ user }`，校验确认码后才真正建账号并自动登录
  *   没收到邮件时可以 `POST /api/auth/register/resend` 重发（同一邮箱 60 秒一次）。
  *
+ * 忘记密码（登录页的「忘记密码？找回密码」入口）：
+ *   `POST /api/auth/password-reset` → 校验邮箱后**生成一个临时密码**直接换掉旧密码、
+ *   作废该账号的全部会话，并把新密码邮件发给本人（与管理端重置密码同一套逻辑）。
+ *   邮箱不存在时 404 `email_not_found`（「这个邮箱不存在，请确认是否正确！」）。
+ *
  * 会话默认只走 HttpOnly cookie；带 `tokenInBody: true` 时令牌会额外出现在响应体里，
  * 供「Cookie 存不下来」的手机浏览器用 `Authorization: Bearer` 兜底（见 `wantsTokenInBody`）。
  */
-import type { LoginResponse, VerifyRegistrationResponse } from '../../shared/types';
+import type { LoginResponse, PasswordResetRequested, VerifyRegistrationResponse } from '../../shared/types';
 import {
   assertSignupAllowed,
   clearedSessionCookie,
   createSession,
   currentSessionHash,
   destroySession,
+  generatePassword,
   getCurrentUser,
   hashPassword,
   isSecureRequest,
@@ -28,9 +34,10 @@ import {
   wantsTokenInBody,
 } from '../auth';
 import { ensureAdminUser } from '../admin';
-import { emailFailure, sendEmail, shouldEchoCode, verificationCodeEmail } from '../email';
+import { emailFailure, passwordResetEmail, sendEmail, shouldEchoCode, verificationCodeEmail } from '../email';
 import { consumeSignupCode, issueSignupCode, resendSignupCode, type IssuedCode } from '../emailCodes';
 import {
+  HttpError,
   asFlag,
   asString,
   badRequest,
@@ -291,6 +298,69 @@ async function sessionHandler(ctx: RequestContext): Promise<Response> {
   });
 }
 
+/**
+ * 找回密码（登录页「忘记密码？找回密码」）：给这个邮箱**发一条系统生成的临时密码**。
+ *
+ * 流程与管理端「重置密码」完全一致（同一个 `passwordResetEmail` 模板 + `generatePassword`）：
+ *   1. 邮箱不存在 → 404 `email_not_found`，文案就是「这个邮箱不存在，请确认是否正确！」；
+ *   2. 存在 → 先把这个新密码发到邮箱（发信失败就报 502，旧密码不受影响），
+ *      再落库换掉密码并作废该账号**所有设备**上的会话
+ *      （忘密码多半意味着密码已经泄漏，旧会话不该继续有效）；
+ *   3. 没配邮件服务（本地 / CI）或收件人是保留测试域（`AUTH_ECHO_CODE_DOMAINS`，如
+ *      example.com）时不发信，直接把密码回显成 `devPassword` —— 口径同注册确认码的
+ *      `devCode`，让自动化测试能走完整个流程。
+ *
+ * ⚠️ 这个接口不需要登录、也不做节流，拿到邮箱就能把人踢下线（安全性等同于
+ * 「知道邮箱 = 能重置密码」）。控制点是：真实邮箱得自己去收信才能拿到新密码，
+ * 所以别把 `AUTH_ECHO_CODE_DOMAINS` 配上真实域名。
+ */
+async function requestPasswordResetHandler(ctx: RequestContext): Promise<Response> {
+  const env = ctx.env;
+  const body = await readJson(ctx.request);
+  const email = normalizeEmail(body.email);
+
+  const target = await env.DB.prepare('SELECT id, name FROM users WHERE email = ?')
+    .bind(email)
+    .first<SqlRow>();
+  if (!target) throw new HttpError(404, 'email_not_found', '这个邮箱不存在，请确认是否正确！');
+
+  const userId = sqlString(target, 'id');
+  const password = generatePassword();
+  const problem = validatePasswordStrength(password); // 理论不会命中，保险起见还是校验一次
+  if (problem) throw badRequest(problem);
+
+  // 先把临时密码发出去再改库：邮件发不出去就报 502，用户的旧密码仍然可用
+  // （否则「邮件失败 + 密码已换」会把人锁在门外）。
+  const settings = await loadSiteSettings(env);
+  const echo = shouldEchoCode(env, email, settings);
+  if (!echo) {
+    const delivery = await sendEmail(settings, {
+      ...passwordResetEmail(settings, { name: sqlString(target, 'name'), password }),
+      to: email,
+    });
+    if (!delivery.ok) emailFailure(delivery, '临时密码邮件');
+  }
+
+  await env.DB.prepare('UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?')
+    .bind(await hashPassword(password, env), Date.now(), userId)
+    .run();
+  await env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(userId).run();
+
+  if (echo) {
+    // 没配邮件服务或收件人是保留测试域：不发信，直接把临时密码回显（口径同注册的 devCode）
+    console.log(`[password-reset] ${email} 的临时密码是 ${password}（未发信：邮件服务未配置或测试域）`);
+  }
+
+  const payload: PasswordResetRequested = {
+    ok: true,
+    email,
+    emailed: !echo,
+    sessionsRevoked: true,
+    devPassword: echo ? password : undefined,
+  };
+  return json(payload);
+}
+
 export const authRoutes: Route[] = [
   { method: 'POST', path: '/api/auth/register', handler: registerHandler },
   { method: 'POST', path: '/api/auth/register/verify', handler: verifyRegistrationHandler },
@@ -298,6 +368,7 @@ export const authRoutes: Route[] = [
   { method: 'POST', path: '/api/auth/login', handler: loginHandler },
   { method: 'POST', path: '/api/auth/logout', handler: logoutHandler },
   { method: 'POST', path: '/api/auth/password', handler: changePasswordHandler },
+  { method: 'POST', path: '/api/auth/password-reset', handler: requestPasswordResetHandler },
   { method: 'GET', path: '/api/session', handler: sessionHandler },
 ];
 

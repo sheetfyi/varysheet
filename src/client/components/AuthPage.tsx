@@ -32,7 +32,11 @@ function BrandHead({ appName, siteIconUrl }: { appName: string; siteIconUrl: str
 }
 
 export function AuthPage({ appName, siteIconUrl, loginTagline, onAuthenticated }: AuthPageProps) {
-  const [mode, setMode] = useState<'login' | 'register'>('login');
+  /**
+   * forgot = 登录页的「忘记密码？找回密码」：只填邮箱，系统会生成一个新的临时密码
+   * 发到邮箱（该账号在其它设备上的登录会立即失效），登录后可在侧边栏「改密码」换掉。
+   */
+  const [mode, setMode] = useState<'login' | 'register' | 'forgot'>('login');
   /** 注册是两步：先填资料（form），再填邮件里的确认码（code） */
   const [step, setStep] = useState<'form' | 'code'>('form');
   const [email, setEmail] = useState('');
@@ -41,6 +45,8 @@ export function AuthPage({ appName, siteIconUrl, loginTagline, onAuthenticated }
   const [code, setCode] = useState('');
   const [pending, setPending] = useState<RegistrationPending | null>(null);
   const [notice, setNotice] = useState('');
+  /** 找回密码时接口回显的临时密码（只在「邮件服务未配置 / 收件人是测试域」时出现） */
+  const [devPassword, setDevPassword] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [cooldown, setCooldown] = useState(0);
@@ -79,6 +85,17 @@ export function AuthPage({ appName, siteIconUrl, loginTagline, onAuthenticated }
           return;
         }
         onAuthenticated(result.user);
+        return;
+      }
+      // 找回密码：只填邮箱 → 系统换成一个新的临时密码并邮件通知本人（无需登录）
+      if (mode === 'forgot') {
+        const result = await api.requestPasswordReset({ email: email.trim() });
+        setDevPassword(result.devPassword ?? '');
+        setNotice(
+          result.emailed
+            ? `临时密码已发送到 ${result.email}，请用新密码登录（登录后建议马上在「改密码」里换成自己的密码）。`
+            : `邮件服务未配置（或收件人是测试域），临时密码已直接显示在下方。`,
+        );
         return;
       }
       // 注册必须先勾选「已了解系统的规则和内容合规的要求」（服务端同样会校验）
@@ -150,13 +167,14 @@ export function AuthPage({ appName, siteIconUrl, loginTagline, onAuthenticated }
     }
   };
 
-  const switchMode = (next: 'login' | 'register') => {
+  const switchMode = (next: 'login' | 'register' | 'forgot') => {
     setMode(next);
     setStep('form');
     setCode('');
     setPending(null);
     setError('');
     setNotice('');
+    setDevPassword('');
     // 每次切到注册都要重新确认一次条款（不能沿用上一次的勾选）
     if (next === 'register') setAcceptedTerms(false);
   };
@@ -230,13 +248,17 @@ export function AuthPage({ appName, siteIconUrl, loginTagline, onAuthenticated }
     );
   }
 
-  // ------------------------------------------------------------- 登录 / 注册
+  // ------------------------------------------------------------- 登录 / 注册 / 找回密码
   return (
     <div className="centered">
       <form className="auth-card" onSubmit={submit}>
         <BrandHead appName={appName} siteIconUrl={siteIconUrl} />
         <p className="muted">
-          {mode === 'login' ? loginTagline.trim() || DEFAULT_LOGIN_TAGLINE : '创建账号，开始搭建你的数据库'}
+          {mode === 'login'
+            ? loginTagline.trim() || DEFAULT_LOGIN_TAGLINE
+            : mode === 'register'
+              ? '创建账号，开始搭建你的数据库'
+              : '输入注册邮箱，我们把新的临时密码发给你'}
         </p>
 
         {mode === 'register' ? (
@@ -270,22 +292,24 @@ export function AuthPage({ appName, siteIconUrl, loginTagline, onAuthenticated }
           />
         </label>
 
-        <label className="field">
-          <span>密码</span>
-          <input
-            className="input"
-            type="password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            placeholder="至少 8 位"
-            autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
-            autoCapitalize="none"
-            autoCorrect="off"
-            spellCheck={false}
-            minLength={8}
-            required
-          />
-        </label>
+        {mode === 'forgot' ? null : (
+          <label className="field">
+            <span>密码</span>
+            <input
+              className="input"
+              type="password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              placeholder="至少 8 位"
+              autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              minLength={8}
+              required
+            />
+          </label>
+        )}
 
         {mode === 'register' ? (
           <>
@@ -308,6 +332,21 @@ export function AuthPage({ appName, siteIconUrl, loginTagline, onAuthenticated }
           </>
         ) : null}
 
+        {mode === 'forgot' ? (
+          <p className="small muted">
+            我们会把系统生成的临时密码发到这个邮箱，并让这个账号在其它设备上下线；如果一直收不到，请联系管理员。
+          </p>
+        ) : null}
+
+        {/* 邮件服务没配（或收件人是保留测试域）时接口直接把临时密码回显出来（口径同注册的 devCode） */}
+        {mode === 'forgot' && devPassword ? (
+          <p className="hint-box small">
+            📮 临时密码是 <strong className="code-echo">{devPassword}</strong>
+          </p>
+        ) : null}
+
+        {notice ? <p className="small muted">{notice}</p> : null}
+
         {error ? <p className="error small">{error}</p> : null}
 
         <button
@@ -316,17 +355,29 @@ export function AuthPage({ appName, siteIconUrl, loginTagline, onAuthenticated }
           disabled={busy || (mode === 'register' && !acceptedTerms)}
           style={{ width: '100%', justifyContent: 'center' }}
         >
-          {busy ? '处理中…' : mode === 'login' ? '登录' : '发送确认码'}
+          {busy ? '处理中…' : mode === 'login' ? '登录' : mode === 'register' ? '发送确认码' : '发送临时密码'}
         </button>
 
         <p className="small muted" style={{ textAlign: 'center', marginTop: 12 }}>
-          {mode === 'login' ? '还没有账号？' : '已经有账号了？'}
+          {mode === 'register' ? '已经有账号了？' : '还没有账号？'}
           <button
             type="button"
             className="btn ghost small"
-            onClick={() => switchMode(mode === 'login' ? 'register' : 'login')}
+            onClick={() => switchMode(mode === 'register' ? 'login' : 'register')}
           >
-            {mode === 'login' ? '立即注册' : '去登录'}
+            {mode === 'register' ? '去登录' : '立即注册'}
+          </button>
+        </p>
+
+        {/* 忘记密码入口（登录卡片第二行）：点「找回密码」只填邮箱，系统发一封新的临时密码 */}
+        <p className="small muted" style={{ textAlign: 'center' }}>
+          {mode === 'forgot' ? '想起密码了？' : '忘记密码？'}
+          <button
+            type="button"
+            className="btn ghost small"
+            onClick={() => switchMode(mode === 'forgot' ? 'login' : 'forgot')}
+          >
+            {mode === 'forgot' ? '去登录' : '找回密码'}
           </button>
         </p>
       </form>

@@ -89,6 +89,35 @@ export function validatePasswordStrength(password: string): string | null {
   return null;
 }
 
+/** 临时密码用的字符集：大小写字母 + 数字，去掉了容易看错的 I l 1 O 0 */
+const PASSWORD_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+
+function randomIndex(max: number): number {
+  const buffer = new Uint32Array(1);
+  const limit = Math.floor(0x1_0000_0000 / max) * max;
+  let value = 0;
+  do {
+    crypto.getRandomValues(buffer);
+    value = buffer[0] ?? 0;
+  } while (value >= limit);
+  return value % max;
+}
+
+/**
+ * 生成一个满足强度要求（含字母与数字）的临时密码，用于「管理员重置密码」与
+ * 登录页的「找回密码」（用户自己忘了密码时系统发一封新的临时密码给他）。
+ */
+export function generatePassword(length = 12): string {
+  let password = '';
+  for (let index = 0; index < length; index += 1) password += PASSWORD_ALPHABET[randomIndex(PASSWORD_ALPHABET.length)];
+  if (!/\d/.test(password)) {
+    const digit = String(randomIndex(10));
+    const at = randomIndex(password.length);
+    password = `${password.slice(0, at)}${digit}${password.slice(at + 1)}`;
+  }
+  return password;
+}
+
 /* --------------------------------------------------------------- sessions */
 
 export async function createSession(

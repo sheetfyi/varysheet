@@ -12,7 +12,8 @@
  * signup (email code) -> session -> create table -> add field -> records
  * (create/update/duplicate/delete) -> views -> share links -> public read +
  * edit -> members -> notes + @mention inbox -> view invites (邀请未注册邮箱)
- * -> password change -> admin panel (含批量删除账号) -> file upload ->
+ * -> password change -> 忘记密码（自助找回：系统换一个临时密码并作废旧会话）->
+ * admin panel (含批量删除账号) -> file upload ->
  * capacity limits (记录数 / 附件到上限后只拦增长) ->
  * cleanup. Exit code is 1 when any check fails.
  *
@@ -2773,6 +2774,68 @@ async function main() {
     'the new password works',
     newLogin.status === 200 && newLogin.data?.user?.email === email,
     `status=${newLogin.status}`,
+  );
+
+  // ------------------------- 忘记密码（登录页「忘记密码？找回密码」→ 临时密码邮件）
+  section('password reset (忘记密码 → 找回密码)');
+  const unknownResetEmail = await call('/api/auth/password-reset', {
+    cookie: false,
+    method: 'POST',
+    body: { email: `nobody+${Date.now()}@example.com` },
+  });
+  check(
+    'an unregistered email cannot ask for a reset',
+    unknownResetEmail.status === 404 &&
+      unknownResetEmail.data?.error?.code === 'email_not_found' &&
+      String(unknownResetEmail.data?.error?.message ?? '').includes('这个邮箱不存在'),
+    `status=${unknownResetEmail.status} code=${unknownResetEmail.data?.error?.code ?? ''}`,
+  );
+
+  const liveCookie = cookie;
+  const resetRequest = await call('/api/auth/password-reset', {
+    cookie: false,
+    method: 'POST',
+    body: { email },
+  });
+  const resetPassword = typeof resetRequest.data?.devPassword === 'string' ? resetRequest.data.devPassword : '';
+  check(
+    'requesting a reset issues a fresh temporary password',
+    resetRequest.status === 200 &&
+      resetRequest.data?.ok === true &&
+      resetRequest.data?.sessionsRevoked === true &&
+      resetPassword.length >= 8 &&
+      /[A-Za-z]/.test(resetPassword) &&
+      /\d/.test(resetPassword),
+    `status=${resetRequest.status} chars=${resetPassword.length}`,
+  );
+  check(
+    'the temporary password is echoed for test domains',
+    resetRequest.data?.emailed === false,
+    `emailed=${resetRequest.data?.emailed}`,
+  );
+
+  const resetEvicted = await call('/api/session', { cookie: false, headers: { cookie: liveCookie } });
+  check('the reset signs the old sessions out', resetEvicted.data?.user === null, `user=${resetEvicted.data?.user ?? 'null'}`);
+
+  const deadResetPassword = await call('/api/auth/login', {
+    cookie: false,
+    method: 'POST',
+    body: { email, password: NEW_PASSWORD },
+  });
+  check(
+    'the previous password stops working after a reset',
+    deadResetPassword.status === 401,
+    `status=${deadResetPassword.status}`,
+  );
+
+  const resetLogin = await call('/api/auth/login', {
+    method: 'POST',
+    body: { email, password: resetPassword },
+  });
+  check(
+    'the emailed temporary password works',
+    resetLogin.status === 200 && resetLogin.data?.user?.email === email,
+    `status=${resetLogin.status}`,
   );
 
   // --------------------------------------------- 用户管理（超级管理员 / 超级用户）

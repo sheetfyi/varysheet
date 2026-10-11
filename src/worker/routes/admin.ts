@@ -19,7 +19,7 @@
  * 删除账号会连同他拥有的表格（记录 / 备注 / 上传文件）一起清理，
  * 具体范围见 worker/admin.ts 的 `deleteAdminUsers`。
  */
-import { hashPassword, requireAdmin, validatePasswordStrength } from '../auth';
+import { generatePassword, hashPassword, requireAdmin, validatePasswordStrength } from '../auth';
 import { MAX_DELETE_USERS, deleteAdminUsers, loadAdminUser, loadAdminUsers } from '../admin';
 import { passwordResetEmail, sendEmail, shouldEchoCode } from '../email';
 import { grantQuota, parsePurchaseInput } from '../orders';
@@ -50,32 +50,6 @@ import {
 } from '../settings';
 import type { Route, RequestContext } from '../types';
 import { loadTableQuota } from './quota';
-
-/** 大小写字母 + 数字，去掉了容易看错的 I l 1 O 0 */
-const PASSWORD_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
-
-function randomIndex(max: number): number {
-  const buffer = new Uint32Array(1);
-  const limit = Math.floor(0x1_0000_0000 / max) * max;
-  let value = 0;
-  do {
-    crypto.getRandomValues(buffer);
-    value = buffer[0] ?? 0;
-  } while (value >= limit);
-  return value % max;
-}
-
-/** 生成一个满足强度要求（含字母与数字）的临时密码。 */
-function generatePassword(length = 12): string {
-  let password = '';
-  for (let index = 0; index < length; index += 1) password += PASSWORD_ALPHABET[randomIndex(PASSWORD_ALPHABET.length)];
-  if (!/\d/.test(password)) {
-    const digit = String(randomIndex(10));
-    const at = randomIndex(password.length);
-    password = `${password.slice(0, at)}${digit}${password.slice(at + 1)}`;
-  }
-  return password;
-}
 
 async function listUsersHandler(ctx: RequestContext): Promise<Response> {
   await requireAdmin(ctx.request, ctx.env);
