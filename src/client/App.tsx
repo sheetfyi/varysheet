@@ -56,7 +56,9 @@ interface InboxTarget {
 }
 
 /** 侧边栏展开状态在本地记住（下次打开保持上次的选择） */
-const SIDEBAR_KEY = 'qafield.sidebar-open';
+const SIDEBAR_KEY = 'varysheet.sidebar-open';
+/** 品牌改名前的旧键（读得到就顺手迁到新键上，老用户上次的展开 / 收起选择不会丢） */
+const LEGACY_SIDEBAR_KEYS = ['qafield.sidebar-open'];
 /** 窄屏断点，必须与 styles.css 里的媒体查询保持一致 */
 const NARROW_QUERY = '(max-width: 900px)';
 
@@ -72,11 +74,24 @@ function isNarrowViewport(): boolean {
 function initialSidebarOpen(): boolean {
   if (isNarrowViewport()) return false;
   try {
-    return window.localStorage.getItem(SIDEBAR_KEY) !== 'false';
+    const saved = window.localStorage.getItem(SIDEBAR_KEY) ?? readLegacySidebarPreference();
+    return saved !== 'false';
   } catch {
     // 隐私模式下 localStorage 不可用，退化为默认展开
     return true;
   }
+}
+
+/** 旧键里还留着「展开 / 收起」的话，迁到新键上并把旧键删掉 */
+function readLegacySidebarPreference(): string | null {
+  for (const legacyKey of LEGACY_SIDEBAR_KEYS) {
+    const value = window.localStorage.getItem(legacyKey);
+    if (value === null) continue;
+    window.localStorage.setItem(SIDEBAR_KEY, value);
+    window.localStorage.removeItem(legacyKey);
+    return value;
+  }
+  return null;
 }
 
 /** `/share/<token>` is served by the SPA fallback, everything else is the app. */

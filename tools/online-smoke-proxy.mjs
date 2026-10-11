@@ -5,7 +5,7 @@
 //
 // 用法（PowerShell，先确认系统代理端口，例如 127.0.0.1:10809）：
 //   $env:HTTPS_PROXY = 'http://127.0.0.1:10809'
-//   $env:BASE_URL    = 'https://cloudnotion.<subdomain>.workers.dev'
+//   $env:BASE_URL    = 'https://varysheet.<subdomain>.workers.dev'
 //   node --import "file:///<仓库路径>/tools/online-smoke-proxy.mjs" scripts/smoke-test.mjs
 //
 // 说明：GitHub Actions 里不需要（CI 跑在墙外，直连即可）。

@@ -2,8 +2,11 @@
 #
 # 触发方式
 #   - push 到 main      -> 校验 -> 端到端冒烟测试 -> 自动部署到 Cloudflare Workers -> 线上冒烟测试
+#                          全自动，不需要在网页上点「Run workflow」或确认任何选项：
+#                          线上地址会写进 Step Summary，并作为一条 commit status
+#                          （`deploy/cloudflare-workers`）挂到这次提交上
 #   - pull_request      -> 只做校验与冒烟测试（绝不部署）
-#   - workflow_dispatch -> 手动触发（可勾选跳过远程 D1 迁移）
+#   - workflow_dispatch -> 可选的手动重跑（想跳过远程 D1 迁移 / 跳过线上冒烟时才用）
 #
 # 需要的仓库 Secrets（Settings -> Secrets and variables -> Actions -> New repository secret）
 #   CLOUDFLARE_API_TOKEN   必需。Cloudflare API 令牌
@@ -43,6 +46,9 @@ on:
 
 permissions:
   contents: read
+  # 部署完成后把线上地址写成一条 commit status（`deploy/cloudflare-workers`）：
+  # 不用开网页翻日志，终端 / 提交页上就能看到这次提交部署到哪个地址
+  statuses: write
 
 concurrency:
   group: deploy-${{ github.ref }}
@@ -331,6 +337,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 线上冒烟测试（对部署后的真实地址跑完整断言）
+        id: online_smoke
         if: steps.creds.outputs.ready == 'true' && inputs.skip_online_smoke != 'true'
         env:
           BASE_URL: ${{ steps.deploy.outputs.url }}
@@ -371,3 +378,39 @@ jobs:
           node scripts/smoke-test.mjs 2>&1 | tee /tmp/smoke-online.log
           count="$(grep -Eo '[0-9]+/[0-9]+ checks passed' /tmp/smoke-online.log | tail -n 1 || true)"
           echo "- 线上冒烟测试（${BASE_URL}）：${count:-已通过 ✅}" >> "$GITHUB_STEP_SUMMARY"
+
+      # 收尾：把这次的线上地址写成一条 commit status（`deploy/cloudflare-workers`）。
+      # 好处是「push 完不用开网页」——终端里 `git log`、提交页、或
+      # `curl -s https://api.github.com/repos/<owner>/<repo>/commits/<sha>/statuses`
+      # 都能直接读到这次部署的地址与成败，不需要给任何人「点确认」。
+      - name: 把线上地址写到提交状态
+        if: always() && steps.creds.outputs.ready == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOY_URL: ${{ steps.deploy.outputs.url }}
+          DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
+          SMOKE_OUTCOME: ${{ steps.online_smoke.outcome }}
+        run: |
+          set -uo pipefail
+          if [ -z "${DEPLOY_URL:-}" ]; then
+            echo "没有解析到 workers.dev 地址（用自定义域名时属正常），跳过提交状态"
+            exit 0
+          fi
+          if [ "${DEPLOY_OUTCOME}" = "success" ] && { [ "${SMOKE_OUTCOME}" = "success" ] || [ "${SMOKE_OUTCOME}" = "skipped" ]; }; then
+            state=success
+            description="build ${GITHUB_SHA:0:7} 已部署"
+          else
+            state=failure
+            description="部署或线上冒烟测试未通过"
+          fi
+          body="$(printf '{"state":"%s","context":"deploy/cloudflare-workers","description":"%s","target_url":"%s"}' \
+            "$state" "$description" "$DEPLOY_URL")"
+          if curl -fsS -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -d "$body" > /dev/null; then
+            echo "提交状态已更新（${state}）：${DEPLOY_URL}"
+          else
+            echo "::warning title=写入提交状态失败::不影响部署结果，线上地址见上面的日志与 Step Summary"
+          fi

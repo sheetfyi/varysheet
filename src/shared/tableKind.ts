@@ -13,8 +13,9 @@
  *   购买价格 试用：免费（不单卖）              基础：9.9 元/月             专业：99.9 元/月
  *
  * 购买价格写成「每月单价（分）」放在 §TABLE_KIND_META 里。购买时长按「单位 × 数量」选：
- * 时长单位固定是「月」（`PURCHASE_UNIT_MONTHS`），时长数量可选 1 ~ 12 个
- * （`PURCHASE_MONTH_UNITS`），总月数 = 单位月数 × 数量（`purchaseMonthsOf`），
+ * 时长单位是「月」（1 个单位 = 1 个月）或「年」（1 个单位 = 12 个月），见 §PURCHASE_UNITS；
+ * 时长数量跟着单位走（月 1 ~ 12 个、年 1 ~ 5 个），总月数 = 单位月数 × 数量
+ * （`purchaseMonthsOf`；服务端只认 `PURCHASE_MONTH_OPTIONS` 里那几档月数），
  * 金额 = 每月单价 × 购买数量 × 总月数（`purchaseAmountCents`）。
  *
  * 「不限」在数据里统一写成 0（`maxRecords <= 0` 即不限制），前端据此显示「不限」。
@@ -156,45 +157,91 @@ export function tableKindCapacityText(kind: TableKind | string | null | undefine
 /* ------------------------------------------------------------ 购买价格与时长的口径 */
 
 /**
- * 购买时长的**单位**：固定按「月」计价（1 个单位 = 1 个月）。
- * 说明弹窗里「时长单位」下拉就用它 —— 现在只放一个选项，以后要加「年」只在这里扩展。
+ * 购买时长的**单位**：一个单位等于几个月，买的时候再选「时长数量」（买几个单位）。
+ * 说明弹窗的「时长单位」下拉就用这张表，服务端只认这两档算出来的总月数：
+ *   月（`month`）1 个单位 = 1 个月，数量 1 ~ 12 → 总时长 1 ~ 12 个月；
+ *   年（`year`）1 个单位 = 12 个月，数量 1 ~ 5 → 总时长 12 / 24 / 36 / 48 / 60 个月。
  */
-export const PURCHASE_UNIT_MONTHS = 1;
-
-/**
- * 「时长单位」下拉的选项：`key` 给 React 当 key、`label` 是显示名、
- * `months` 是「一个单位等于几个月」。需求是时长以月为单位、多少个月由后面的
- * 「时长数量」选，所以现在只有「月」这一项。
- */
-export const PURCHASE_UNITS: readonly { key: string; label: string; months: number }[] = [
-  { key: 'month', label: '月', months: PURCHASE_UNIT_MONTHS },
-];
-
-/** 「时长数量」最多能选几个单位（单位是月 → 最多 12 个月，覆盖原来的「按年」） */
-export const MAX_PURCHASE_MONTH_UNITS = 12;
-
-/** 「时长数量」下拉的可选值：1 ~ 12 个（单位是月，所以就是 1 ~ 12 个月） */
-export const PURCHASE_MONTH_UNITS: readonly number[] = Array.from(
-  { length: MAX_PURCHASE_MONTH_UNITS },
-  (_unused, index) => index + 1,
-);
-
-/** 服务端认可的**总时长**下限（月）：单位 × 数量至少 1 个月 */
-export const MIN_PURCHASE_MONTHS = PURCHASE_UNIT_MONTHS;
-
-/** 服务端认可的**总时长**上限（月）：1 个月 × 12 个 = 12 个月 */
-export const MAX_PURCHASE_MONTHS = PURCHASE_UNIT_MONTHS * MAX_PURCHASE_MONTH_UNITS;
-
-/** 总月数 = 时长单位（月）× 时长数量；说明弹窗与 `POST /api/quota/purchases` 共用这一条算式 */
-export function purchaseMonthsOf(unitMonths: number, unitCount: number): number {
-  const unit = Number.isFinite(unitMonths) ? Math.max(1, Math.trunc(unitMonths)) : PURCHASE_UNIT_MONTHS;
-  const count = Number.isFinite(unitCount) ? Math.max(1, Math.trunc(unitCount)) : 1;
-  return unit * count;
+export interface PurchaseUnit {
+  /** 「时长单位」下拉的 value（也是 React key） */
+  key: PurchaseUnitKey;
+  /** 显示名：月 / 年 */
+  label: string;
+  /** 一个单位等于几个月 */
+  months: number;
+  /** 「时长数量」最少选几个 */
+  minUnits: number;
+  /** 「时长数量」最多选几个 */
+  maxUnits: number;
 }
 
-/** 总时长能不能买：整数且落在 1 ~ `MAX_PURCHASE_MONTHS` 个月之间（服务端白名单） */
+/** 「时长单位」的两个取值 */
+export type PurchaseUnitKey = 'month' | 'year';
+
+/** 「时长单位」下拉的选项（顺序即下拉顺序，第一项是默认值） */
+export const PURCHASE_UNITS: readonly PurchaseUnit[] = [
+  { key: 'month', label: '月', months: 1, minUnits: 1, maxUnits: 12 },
+  { key: 'year', label: '年', months: 12, minUnits: 1, maxUnits: 5 },
+];
+
+/** 默认时长单位：「月」（1 个月） */
+export const DEFAULT_PURCHASE_UNIT: PurchaseUnitKey = 'month';
+
+/** 规范化「时长单位」：任何来路不明的值都当成「月」（老客户端 / 脏数据都不会掉进未知单位） */
+export function asPurchaseUnitKey(value: unknown): PurchaseUnitKey {
+  return value === 'year' ? 'year' : 'month';
+}
+
+/** 按 key 找一个单位；未知 key 退回「月」 */
+export function purchaseUnitOf(key: unknown): PurchaseUnit {
+  const wanted = asPurchaseUnitKey(key);
+  return PURCHASE_UNITS.find((unit) => unit.key === wanted) ?? PURCHASE_UNITS[0];
+}
+
+/** 某个单位下「时长数量」的可选值：`1 ~ maxUnits`（月 → 1 ~ 12，年 → 1 ~ 5） */
+export function purchaseUnitCounts(unit: PurchaseUnit | string | null | undefined): number[] {
+  const resolved = unit && typeof unit === 'object' ? unit : purchaseUnitOf(unit);
+  const min = Math.max(1, Math.trunc(resolved.minUnits));
+  const max = Math.max(min, Math.trunc(resolved.maxUnits));
+  return Array.from({ length: max - min + 1 }, (_unused, index) => min + index);
+}
+
+/** 「时长数量」下拉里每个选项的文案：单位是月 → `3 个月`；单位是年 → `2 年（24 个月）` */
+export function purchaseUnitCountLabel(unit: PurchaseUnit | string | null | undefined, count: number): string {
+  const resolved = unit && typeof unit === 'object' ? unit : purchaseUnitOf(unit);
+  const value = Math.max(resolved.minUnits, Number.isFinite(count) ? Math.trunc(count) : resolved.minUnits);
+  if (resolved.months === 1) return purchaseMonthsLabel(value);
+  return `${value} ${resolved.label}（${resolved.months * value} 个月）`;
+}
+
+/** 总月数 = 时长单位（1 个月 / 12 个月）× 时长数量；说明弹窗与 `POST /api/quota/purchases` 共用这一条算式 */
+export function purchaseMonthsOf(unitKey: unknown, unitCount: number): number {
+  const unit = purchaseUnitOf(unitKey);
+  const raw = Number.isFinite(unitCount) ? Math.trunc(unitCount) : unit.minUnits;
+  const count = Math.min(Math.max(raw, unit.minUnits), unit.maxUnits);
+  return unit.months * count;
+}
+
+/** 服务端认可的**总时长**下限（月）：最小的一档是「月」× 1 个 */
+export const MIN_PURCHASE_MONTHS = 1;
+
+/** 服务端认可的**总时长**上限（月）：最大的一档是「年」× 5 个 = 60 个月 */
+export const MAX_PURCHASE_MONTHS = PURCHASE_UNITS.reduce(
+  (max, unit) => Math.max(max, unit.months * unit.maxUnits),
+  MIN_PURCHASE_MONTHS,
+);
+
+/**
+ * 总时长白名单：只认「时长单位 × 时长数量」真能算出来的整数月数 ——
+ * 月 → 1 ~ 12 个月，年 → 12 / 24 / 36 / 48 / 60 个月；13、72、0 这类凑不出来的月数一律 400。
+ */
+export const PURCHASE_MONTH_OPTIONS: readonly number[] = Array.from(
+  new Set(PURCHASE_UNITS.flatMap((unit) => purchaseUnitCounts(unit).map((count) => unit.months * count))),
+).sort((first, second) => first - second);
+
+/** 总时长能不能买：必须是 `PURCHASE_MONTH_OPTIONS` 里的整数月数（服务端白名单） */
 export function isPurchasableMonths(months: number): boolean {
-  return Number.isInteger(months) && months >= MIN_PURCHASE_MONTHS && months <= MAX_PURCHASE_MONTHS;
+  return Number.isInteger(months) && PURCHASE_MONTH_OPTIONS.includes(months);
 }
 
 /** 某一类的每月单价（分）；0 = 不单卖（试用表格） */
@@ -215,11 +262,15 @@ export function tableKindPriceText(kind: TableKind | string | null | undefined):
   return cents > 0 ? `${formatPriceCents(cents)}/月` : '免费';
 }
 
-/** 总时长文案：`1 个月` / `12 个月（一年）`（购买提示、下拉框选项都用它） */
+/** 整年时长的中文说法：`12 → 一年`、`24 → 二年`…（只列到「年」这个单位能买满的 5 年） */
+const PURCHASE_YEAR_LABELS = ['一年', '二年', '三年', '四年', '五年'];
+
+/** 总时长文案：`1 个月` / `12 个月（一年）` / `24 个月（二年）`（购买提示、对比表、下拉框都用它） */
 export function purchaseMonthsLabel(months: number): string {
   if (!Number.isFinite(months)) return '时长未知';
   const value = Math.max(0, Math.trunc(months));
-  return value === 12 ? '12 个月（一年）' : `${value} 个月`;
+  const yearLabel = value >= 12 && value % 12 === 0 ? PURCHASE_YEAR_LABELS[value / 12 - 1] : undefined;
+  return yearLabel ? `${value} 个月（${yearLabel}）` : `${value} 个月`;
 }
 
 /** 一单金额（分）= 每月单价 × 数量 × 月数；试用表格（单价 0）恒为 0 */
@@ -292,7 +343,7 @@ export const TABLE_KIND_FEATURES: TableKindFeature[] = [
   {
     label: '价格',
     trial: '免费（注册就送 1 个）',
-    basic: `${tableKindPriceText('basic')}，按时长购买（单位月 × 时长数量）`,
-    pro: `${tableKindPriceText('pro')}，按时长购买（单位月 × 时长数量）`,
+    basic: `${tableKindPriceText('basic')}，按时长购买（时长单位「月 / 年」× 时长数量）`,
+    pro: `${tableKindPriceText('pro')}，按时长购买（时长单位「月 / 年」× 时长数量）`,
   },
 ];

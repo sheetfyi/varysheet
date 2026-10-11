@@ -362,7 +362,8 @@ export interface DatabaseCapacity {
  *     每成功邀请一位**新用户**注册再多 1 个（`trial_table_grants` 表），不单卖；
  *   - 基础表格：没有赠送名额（**分享也不加**），只能购买（9.9 元/月）；
  *   - 专业表格：同样没有赠送名额（**分享也不加**），只能购买（99.9 元/月）。
- * 购买时长按「单位 × 数量」选：时长单位固定是「月」，时长数量 1 ~ 12 个（总月数 = 1 × 数量）。
+ * 购买时长按「单位 × 数量」选：时长单位「月」（1 个月）或「年」（12 个月），时长数量月 1 ~ 12 个 /
+ * 年 1 ~ 5 个（总月数 = 单位月数 × 数量，1 ~ 60 个月）。
  * 「已用」只算自己拥有的、未归档的、这一类型的表格，别人分享给你的表不算。
  */
 export interface TableQuota {
@@ -397,7 +398,7 @@ export interface TableQuotaSet {
  * 立刻加名额，以后接支付时把订单号写进 `channel` / `note` 即可。
  *
  * 价格口径见 `src/shared/tableKind.ts`：基础表格 9.9 元/月、专业表格 99.9 元/月，
- * 购买时长按「单位 × 数量」选（单位固定是「月」，数量 1 ~ 12 个），
+ * 购买时长按「单位 × 数量」选（单位「月」配 1 ~ 12 个，或单位「年」配 1 ~ 5 个），
  * `amountCents` = 每月单价 × 购买数量 × 总月数。
  */
 export interface TablePurchase {
@@ -406,7 +407,7 @@ export interface TablePurchase {
   kind: TableKind;
   /** 这次买了几个名额 */
   count: number;
-  /** 总购买时长（月）= 时长单位（1 个月）× 时长数量（1 ~ 12，见 `tableKind.ts` 的 `purchaseMonthsOf`） */
+  /** 总购买时长（月）= 时长单位（1 / 12 个月）× 时长数量（月 1 ~ 12 / 年 1 ~ 5，见 `tableKind.ts` 的 `purchaseMonthsOf`） */
   months: number;
   /** 这一单的金额（分） */
   amountCents: number;

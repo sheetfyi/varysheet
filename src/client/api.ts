@@ -99,13 +99,24 @@ interface RequestOptions {
  * 正常情况下会话完全由 HttpOnly cookie 承载，这里什么都不存；只有服务端在响应体里
  * 下发了令牌（客户端主动带 `tokenInBody: true`）时才用得上。
  */
-const SESSION_TOKEN_KEY = 'qafield.session-token';
+const SESSION_TOKEN_KEY = 'varysheet.session-token';
+/** 品牌改名前的旧键（读到就迁到新键，老用户的令牌不会丢） */
+const LEGACY_SESSION_TOKEN_KEYS = ['qafield.session-token'];
 let memoryToken: string | null = null;
 
 /** 读取本地会话令牌（无痕 / 隐私模式下 localStorage 不可用，退化为内存）。 */
 export function readSessionToken(): string | null {
   try {
-    return window.localStorage.getItem(SESSION_TOKEN_KEY) ?? memoryToken;
+    const current = window.localStorage.getItem(SESSION_TOKEN_KEY);
+    if (current) return current;
+    for (const legacyKey of LEGACY_SESSION_TOKEN_KEYS) {
+      const legacy = window.localStorage.getItem(legacyKey);
+      if (!legacy) continue;
+      window.localStorage.setItem(SESSION_TOKEN_KEY, legacy);
+      window.localStorage.removeItem(legacyKey);
+      return legacy;
+    }
+    return memoryToken;
   } catch {
     return memoryToken;
   }
@@ -117,6 +128,7 @@ export function setSessionToken(token: string | null): void {
   try {
     if (token === null) window.localStorage.removeItem(SESSION_TOKEN_KEY);
     else window.localStorage.setItem(SESSION_TOKEN_KEY, token);
+    for (const legacyKey of LEGACY_SESSION_TOKEN_KEYS) window.localStorage.removeItem(legacyKey);
   } catch {
     // localStorage 直接抛异常也无所谓：令牌留在内存里，本次会话依然可用
   }
@@ -269,8 +281,9 @@ export const api = {
    * 购买表格名额：买几个就多几个可添加的表格（可选基础表格 / 专业表格），
    * 支付还没接入，服务端会立刻写一条购买流水并加名额。
    * 基础 9.9 元/月、专业 99.9 元/月：`months` 是**总购买时长**
-   * （时长单位固定是「月」，时长数量 1 ~ 12 个 → 1 ~ 12 个月，见 shared/tableKind.ts 的
-   * `purchaseMonthsOf`），金额由服务端按「每月单价 × 数量 × 月数」算好写进流水。
+   * （时长单位「月」× 数量 1 ~ 12，或时长单位「年」× 数量 1 ~ 5 → 1 ~ 60 个月，
+   * 见 shared/tableKind.ts 的 `purchaseMonthsOf` / `isPurchasableMonths`），
+   * 金额由服务端按「每月单价 × 数量 × 月数」算好写进流水。
    */
   purchaseQuota: (body: { kind: TableKind; count: number; months: number; note?: string }) =>
     json<{ quota: TableQuotaSet; purchase: TablePurchase }>('/api/quota/purchases', 'POST', body),

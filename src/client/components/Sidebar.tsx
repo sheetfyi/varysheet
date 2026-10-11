@@ -23,18 +23,21 @@ import {
 } from '../../shared/quota';
 import {
   BUYABLE_TABLE_KINDS,
-  PURCHASE_MONTH_UNITS,
+  DEFAULT_PURCHASE_UNIT,
   PURCHASE_UNITS,
-  PURCHASE_UNIT_MONTHS,
   TABLE_KIND_FEATURES,
   TABLE_KINDS,
+  asPurchaseUnitKey,
   asTableKind,
-  purchaseMonthsLabel,
   purchaseMonthsOf,
   purchasePriceText,
+  purchaseUnitCountLabel,
+  purchaseUnitCounts,
+  purchaseUnitOf,
   tableKindCapacityText,
   tableKindMeta,
 } from '../../shared/tableKind';
+import type { PurchaseUnitKey } from '../../shared/tableKind';
 import type {
   DatabaseCapacity,
   DatabaseSummary,
@@ -333,15 +336,24 @@ function QuotaDialog({
 }) {
   const [kind, setKind] = useState<TableKind>('basic');
   const [count, setCount] = useState(1);
-  /** 购买时长的**单位**（一个单位等于几个月）：现在是「月」（见 shared/tableKind.ts 的 `PURCHASE_UNITS`） */
-  const [unitMonths, setUnitMonths] = useState(PURCHASE_UNIT_MONTHS);
-  /** 购买时长的**数量**（选几个单位）：单位是月，所以选 1 就是买 1 个月 */
+  /** 购买时长的**单位**：月（1 个单位 = 1 个月）或 年（1 个单位 = 12 个月，见 shared/tableKind.ts 的 `PURCHASE_UNITS`） */
+  const [unitKey, setUnitKey] = useState<PurchaseUnitKey>(DEFAULT_PURCHASE_UNIT);
+  /** 购买时长的**数量**（选几个单位）：月 → 1 ~ 12 个月，年 → 1 ~ 5 年 */
   const [unitCount, setUnitCount] = useState(1);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const meta = tableKindMeta(kind);
+  /** 当前选中的时长单位：「时长数量」的可选范围与文案都跟着它走 */
+  const unit = purchaseUnitOf(unitKey);
   /** 总购买时长（月）= 时长单位 × 时长数量；服务端按它算价（`purchaseMonthsOf`） */
-  const months = purchaseMonthsOf(unitMonths, unitCount);
+  const months = purchaseMonthsOf(unitKey, unitCount);
+
+  /** 换时长单位：数量夹回新单位的范围（比如「12 个月」切到「年」时会收成 5） */
+  const changeUnit = (next: string) => {
+    const target = purchaseUnitOf(asPurchaseUnitKey(next));
+    setUnitKey(target.key);
+    setUnitCount((current) => Math.min(Math.max(current, target.minUnits), target.maxUnits));
+  };
 
   const submit = async () => {
     if (busy) return;
@@ -415,22 +427,22 @@ function QuotaDialog({
         </label>
         <label className="field">
           <span>时长单位</span>
-          {/* 购买时长以「月」为单位（shared/tableKind.ts 的 PURCHASE_UNITS）；以后加「年」只改那里 */}
-          <select className="input" value={unitMonths} onChange={(event) => setUnitMonths(Number(event.target.value))}>
-            {PURCHASE_UNITS.map((unit) => (
-              <option key={unit.key} value={unit.months}>
-                {unit.label}
+          {/* 购买时长按「单位 × 数量」算：月（1 个月）或 年（12 个月），见 shared/tableKind.ts 的 PURCHASE_UNITS */}
+          <select className="input" value={unitKey} onChange={(event) => changeUnit(event.target.value)}>
+            {PURCHASE_UNITS.map((item) => (
+              <option key={item.key} value={item.key}>
+                {item.label}
               </option>
             ))}
           </select>
         </label>
         <label className="field">
           <span>时长数量</span>
-          {/* 选几个单位：单位是月，所以「1」= 1 个月、「12」= 12 个月（= 一年） */}
+          {/* 选几个单位：月 → 1 ~ 12 个月；年 → 1 ~ 5 年（12 ~ 60 个月） */}
           <select className="input" value={unitCount} onChange={(event) => setUnitCount(Number(event.target.value))}>
-            {PURCHASE_MONTH_UNITS.map((value) => (
+            {purchaseUnitCounts(unit).map((value) => (
               <option key={value} value={value}>
-                {purchaseMonthsLabel(value)}
+                {purchaseUnitCountLabel(unit, value)}
               </option>
             ))}
           </select>

@@ -79,7 +79,9 @@ npm run deploy                 # vite build && wrangler deploy
 ```
 
 部署成功后会得到 `https://varysheet.<your-subdomain>.workers.dev`（`workers_dev: true`；Worker 名取自
-`wrangler.jsonc` 的 `name`，D1 / R2 的名字仍是 `cloudnotion-*` 那套基础设施标识，不受品牌改名影响）。
+`wrangler.jsonc` 的 `name`，D1 / R2 的名字仍是 `cloudnotion-*` 那套基础设施标识，不受品牌改名影响 ——
+那只是**本仓库自己**在用的库名 / 桶名，与其它仓库无关；唯一部署目标就是本仓库
+[`sheetfyi/varysheet`](https://github.com/sheetfyi/varysheet)，push 后由 `deploy.yml` 自动部署）。
 自定义域名：在 Cloudflare 控制台为 Worker 添加 Custom Domain，或在 `wrangler.jsonc` 增加 `routes`。
 
 > **定时任务**：`wrangler deploy` 会一并注册 `wrangler.jsonc` 里的 `triggers.crons`
@@ -107,9 +109,9 @@ npm run deploy                 # vite build && wrangler deploy
 ## 5. 部署后验证
 
 ```bash
-# 冒烟测试（270 项断言，覆盖两步注册/登录/建表/记录/视图/分享/成员/附件/单表容量/表格类型与名额/改密码/用户管理/会话兜底）
+# 冒烟测试（271 项断言，覆盖两步注册/登录/建表/记录/视图/分享/成员/附件/单表容量/表格类型与名额/改密码/用户管理/会话兜底）
 # 线上跑同一套断言：唯一会改密码的「重置自己密码」只对 @example.* 测试管理员执行，
-# 真实 ADMIN_EMAIL 会自动跳过那 2 项（结果 269/269），不会重置你的密码、也不会踢你下线
+# 真实 ADMIN_EMAIL 会自动跳过那 2 项（结果 270/270），不会重置你的密码、也不会踢你下线
 BASE_URL=https://varysheet.<your-subdomain>.workers.dev node scripts/smoke-test.mjs
 
 # 路由自检
@@ -118,7 +120,7 @@ npm run check:routes
 
 > 线上跑冒烟测试前，建议先在 Worker 上配好 `ADMIN_EMAIL` + `ADMIN_PASSWORD`（第 6.6 节）：
 > 配了就会连「用户管理」一起测（工作流会把仓库里同名的 Secrets 透传给线上冒烟测试；未配置时回落到
-> `admin@example.com`，该段自动 `skip`，其余断言照跑 —— 实测这类跑法是 **247/247 checks passed**，
+> `admin@example.com`，该段自动 `skip`，其余断言照跑 —— 实测这类跑法是 **248/248 checks passed**，
 > 不是失败，别误判）。
 >
 > 工作流跑的就是这套脚本，只是多传两个东西：`SMOKE_EXPECT_BUILD=<commit sha>`（断言线上跑的就是
@@ -139,7 +141,7 @@ npm run check:routes
 5. 收起侧边栏（宽屏点侧边栏头部 `«`，手机端点顶部条 ☰ 关掉抽屉）后，页面右上角顶部条应显示当前账号的用户名 / 邮箱与「退出」，点「退出」回到登录页
 6. 侧边栏底部的「改密码」：填当前密码 + 新密码 → 成功后其他设备的会话立即失效，本机继续可用
 7. 用 `ADMIN_EMAIL` 登录后，侧边栏底部会多出「用户管理」：搜一个已注册邮箱 → 改昵称 / 邮箱 → 「重置密码」应弹出新密码（配了 Resend 时同一份密码也会发到对方邮箱）
-8. 侧边栏「我的表格」**上方**应显示「你有 **N** 个表格可」+ 紧挨着的「添加」按钮（同一行）：新账号 N=1；点数字弹出「表格数量说明」（名额规则 + 已添加 / 共几个名额 / 还剩几个 + 购买区：表格类型 / 时长单位 / 时长数量 / 购买数量 + 「购买」按钮，买完立刻加名额）；点「添加」展开输入框，建完一张表数字应减 1；把某个视图分享给另一个账号后再看，数字**不应变化**（分享不再送名额）；**N 减到 0 时「添加」按钮应变灰点不动**
+8. 侧边栏「我的表格」**上方**应显示「你有 **N** 个表格可」+ 紧挨着的「添加」按钮（同一行）：新账号 N=1；点数字弹出「表格数量说明」（名额规则 + 已添加 / 共几个名额 / 还剩几个 + 购买区：表格类型 / 时长单位（月 / 年）/ 时长数量 / 购买数量 + 「购买」按钮，买完立刻加名额）；点「添加」展开输入框，建完一张表数字应减 1；把某个视图分享给另一个账号后再看，数字**不应变化**（分享不再送名额）；**N 减到 0 时「添加」按钮应变灰点不动**
 9. **无痕模式 / 手机（Cookie 存不下来）也能正常登录**：这些环境会把 `Set-Cookie` 丢掉，登录（或点邀请链接注册）后应**稳定停在内容页**，不会闪一下又退回登录页 —— 客户端会用响应体里的令牌兜底（存本地 + `Authorization: Bearer`）。想离线复现这条路径：
    ```bash
    # 本地起一个「丢掉 Set-Cookie」的反向代理，用 390x844 手机视口真跑一遍登录（需要本机装了 Edge / Chrome）
@@ -148,13 +150,15 @@ npm run check:routes
 
 ## 6. GitHub Actions 自动部署（CI/CD）
 
-仓库内置 `.github/workflows/deploy.yml`：**push 到 `main` 即自动部署**；PR 只跑校验与冒烟测试，绝不部署。
+仓库内置 `.github/workflows/deploy.yml`：**push 到 `main` 即自动部署**（不需要在网页上点「Run workflow」、
+也不需要确认任何选项：校验 → 端到端冒烟测试 → 部署 → 线上冒烟测试 → 把线上地址写成一条 commit status）；
+PR 只跑校验与冒烟测试，绝不部署。
 
 | 阶段 | Job | 内容 |
 | --- | --- | --- |
 | 1 | `verify` | `npm ci` → `npm run typecheck`（client + worker）→ `npm run check:routes` → `npm run schema:check`（分片 DDL 与迁移文件是否同步）→ `vite build` |
 | 2 | `e2e` | 本地 D1 迁移（用户库 + 三个分片库） → 后台启动 `wrangler dev --local` → 运行 `scripts/smoke-test.mjs`（断言数见运行日志 / Step Summary） |
-| 3 | `deploy` | `node scripts/sync-d1-ids.mjs --create`（按库名对齐四个 D1 库的 id，缺了就现建） → 确保 R2 桶存在 → `npm run db:migrate:remote` → `vite build` → `wrangler deploy --var BUILD_ID=<commit sha>`（给这次部署打批次号，`/api/health` 的 `build` 会返回它） → 同步可选 Secrets → **等新版本真的在线上服务**（轮询 `/api/health` 的 `build`，每 3 秒一次、最多约 90 秒；没等到会以明确错误停下） → 对线上地址再跑一遍完整冒烟测试（比本地多 1 项：目标跑的就是这次部署） |
+| 3 | `deploy` | `node scripts/sync-d1-ids.mjs --create`（按库名对齐四个 D1 库的 id，缺了就现建） → 确保 R2 桶存在 → `npm run db:migrate:remote` → `vite build` → `wrangler deploy --var BUILD_ID=<commit sha>`（给这次部署打批次号，`/api/health` 的 `build` 会返回它） → 同步可选 Secrets → **等新版本真的在线上服务**（轮询 `/api/health` 的 `build`，每 3 秒一次、最多约 90 秒；没等到会以明确错误停下） → 对线上地址再跑一遍完整冒烟测试（比本地多 1 项：目标跑的就是这次部署） → 把线上地址写成一条 commit status（`deploy/cloudflare-workers`，终端 / 提交页就能看到，无需开网页） |
 
 ### 6.1 一次性配置 Secrets
 

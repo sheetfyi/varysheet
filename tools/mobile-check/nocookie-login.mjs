@@ -239,12 +239,12 @@ record(
   '3 秒后仍在内容页（没有闪退回登录页）',
   (await evaluate(`!!document.querySelector('.app-shell') && !document.querySelector('.auth-card')`)) === true,
 );
-const token = await evaluate(`window.localStorage.getItem('qafield.session-token')`);
+const token = await evaluate(`window.localStorage.getItem('varysheet.session-token')`);
 record('客户端把令牌存到了本地（cookie 兜底生效）', typeof token === 'string' && token.length > 20);
 record(
   '本地令牌通过 Authorization 头能认证',
   (await evaluate(
-    `fetch('/api/session', { headers: { authorization: 'Bearer ' + window.localStorage.getItem('qafield.session-token') } })
+    `fetch('/api/session', { headers: { authorization: 'Bearer ' + window.localStorage.getItem('varysheet.session-token') } })
        .then((r) => r.json()).then((d) => (d.user && d.user.email) || null)`,
   )) === email,
 );

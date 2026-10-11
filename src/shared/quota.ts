@@ -10,8 +10,9 @@
  *   试用 新注册账号送 1 个（一人一张免费试用表）+ 每成功邀请一位新用户注册 +1，不单卖；
  *   基础 没有赠送（**分享也不加**）：只能购买，9.9 元/月；
  *   专业 同样没有赠送（**分享也不加**）：只能购买，99.9 元/月。
- * 购买时长按「单位 × 数量」选：单位固定是「月」，后面再选时长数量（1 ~ 12 个），
- * 总月数 = 1 × 数量，价格口径见 `tableKind.ts` 的 `PURCHASE_UNIT_MONTHS` / `purchaseMonthsOf`。
+ * 购买时长按「单位 × 数量」选：单位是「月」（1 个月）或「年」（12 个月），后面再选时长数量
+ * （月 1 ~ 12 个、年 1 ~ 5 个），总月数 = 单位月数 × 数量（`tableKind.ts` 的 `PURCHASE_UNITS` /
+ * `purchaseMonthsOf`）；服务端只认 `PURCHASE_MONTH_OPTIONS` 里那几档月数。
  */
 import {
   MAX_PURCHASE_MONTHS,
@@ -43,7 +44,7 @@ export const TABLE_QUOTA_RULES: string[] = [
   `新注册账号送 ${BASE_TABLE_QUOTA.trial} 个试用表格（100 条记录 / 0.5GB 附件 / 数据保留半年）；每成功邀请一位新用户注册再 +${INVITE_TRIAL_TABLE_QUOTA} 个。试用表格不单卖。`,
   `基础表格没有赠送名额（分享也不增加）：只能购买，${tableKindPriceText('basic')}，买几个就多几个可添加的基础表格。`,
   `专业表格同样没有赠送名额（分享也不增加）：只能购买，${tableKindPriceText('pro')}，买几个就多几个可添加的专业表格。`,
-  `购买时按时长买：时长单位是「月」，后面再选时长数量（${MIN_PURCHASE_MONTHS} ~ ${MAX_PURCHASE_MONTHS} 个）—— 数量选 1 就是 1 个月；金额 = 每月单价 × 购买数量 × 总月数。`,
+  `购买时按时长买：先选时长单位（「月」1 个月 / 「年」12 个月），再选时长数量（月 1 ~ 12 个、年 1 ~ 5 个），总时长 ${MIN_PURCHASE_MONTHS} ~ ${MAX_PURCHASE_MONTHS} 个月；金额 = 每月单价 × 购买数量 × 总月数。`,
 ];
 
 function countOf(value: number | undefined): number {

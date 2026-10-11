@@ -10,8 +10,8 @@
  *   - 默认名额：试用 1（新注册就送一张免费试用表）、基础 / 专业 0。
  *
  * 购买走 `POST /api/quota/purchases`（body `{ kind, count, months }`）：`months` 是**总时长**
- * （时长单位固定是「月」、数量 1 ~ 12 个 → 1 ~ 12 个月，见 shared/tableKind.ts 的
- * `purchaseMonthsOf` / `isPurchasableMonths`），金额按「每月单价 × 数量 × 总月数」算
+ * （时长单位「月」× 数量 1 ~ 12，或时长单位「年」× 数量 1 ~ 5 → 1 ~ 60 个月，
+ * 见 shared/tableKind.ts 的 `purchaseMonthsOf` / `isPurchasableMonths`），金额按「每月单价 × 数量 × 总月数」算
  * （基础 9.9 元/月、专业 99.9 元/月），写一条流水并**立刻**生效 —— 买几个就多几个可添加
  * 的表格。支付网关还没接入，渠道先记 `self-serve`，
  * 见 migrations/control/0015_table_purchase_pricing.sql 的说明。
@@ -132,8 +132,8 @@ async function quotaHandler(ctx: RequestContext): Promise<Response> {
 /**
  * 购买表格名额：写一条购买流水 + 立刻加名额，响应里带上最新的完整名额。
  *
- * body `{ kind, count, months }`：`months` 是**总购买时长**（时长单位固定是「月」，数量在
- * 说明弹窗的「时长数量」里选 1 ~ 12 个 → 1 ~ 12 个月，见 shared/tableKind.ts 的
+ * body `{ kind, count, months }`：`months` 是**总购买时长**（时长单位「月」→ 数量 1 ~ 12 个月，
+ * 时长单位「年」→ 数量 1 ~ 5 年即 12 / 24 / 36 / 48 / 60 个月，见 shared/tableKind.ts 的
  * `purchaseMonthsOf` / `isPurchasableMonths`），金额由服务端按「每月单价 × 数量 × 月数」
  * 算好写进流水（客户端传什么价都不作数）。支付还没接入，所以现在没有「支付凭证」这一步，
  * `channel` 记 `self-serve`。
@@ -146,11 +146,12 @@ async function purchaseHandler(ctx: RequestContext): Promise<Response> {
   const count = Math.floor(asNumberValue(body.count ?? 1, '购买数量'));
   if (count < 1) throw badRequest('购买数量至少 1 个');
   if (count > MAX_PURCHASE_COUNT) throw badRequest(`一次最多购买 ${MAX_PURCHASE_COUNT} 个名额`);
-  // 购买时长 = 时长单位（月）× 时长数量（1 ~ 12 个）：服务端只认总月数 1 ~ 12
+  // 购买时长 = 时长单位（月 1 个月 / 年 12 个月）× 时长数量（月 1 ~ 12 个、年 1 ~ 5 个）：
+  // 服务端只认这个白名单里的总月数（1 ~ 12 个月，或 12 / 24 / 36 / 48 / 60 个月）
   const months = Math.floor(asNumberValue(body.months ?? 1, '购买时长'));
   if (!isPurchasableMonths(months)) {
     throw badRequest(
-      `购买时长只能选 ${MIN_PURCHASE_MONTHS} ~ ${MAX_PURCHASE_MONTHS} 个月（时长单位是「月」，时长数量 1 ~ ${MAX_PURCHASE_MONTHS} 个）`,
+      `购买时长只能选 ${MIN_PURCHASE_MONTHS} ~ 12 个月（时长单位「月」× 时长数量 1 ~ 12），或 12 / 24 / 36 / 48 / ${MAX_PURCHASE_MONTHS} 个月（时长单位「年」× 时长数量 1 ~ 5）`,
     );
   }
   const note = asString(body.note, '备注', { max: 200 });

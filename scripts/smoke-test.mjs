@@ -320,21 +320,36 @@ async function main() {
       bootstrapPro.data?.quota?.pro?.remaining === 1,
     `purchased=${bootstrapPro.data?.quota?.pro?.purchased} remaining=${bootstrapPro.data?.quota?.pro?.remaining}`,
   );
-  // 购买时长：时长单位固定是「月」，后面再选时长数量（1 ~ 12 个）→ 总时长 1 ~ 12 个月；
+  // 购买时长：时长单位是「月」或「年」（shared/tableKind.ts 的 PURCHASE_UNITS），后面再选数量
+  // （月 → 1 ~ 12 个；年 → 1 ~ 5 个）→ 总时长 1 ~ 12 个月 / 12 ~ 60 个月；
   // 白名单是 shared/tableKind.ts 的 `isPurchasableMonths`，金额 = 每月单价 × 数量 × 总月数
   const longTermPro = await call('/api/quota/purchases', {
     method: 'POST',
     body: { kind: 'pro', count: 1, months: 12 },
   });
   check(
-    'a 12-month term prices the purchase on the server',
+    'a 12-month term (1 year) prices the purchase on the server',
     longTermPro.status === 201 &&
       longTermPro.data?.purchase?.months === 12 &&
       // 专业 99.9 元/月 × 1 个 × 12 个月 = 119880 分
       longTermPro.data?.purchase?.amountCents === 9990 * 12,
     `months=${longTermPro.data?.purchase?.months} amountCents=${longTermPro.data?.purchase?.amountCents}`,
   );
-  // 超出 1 ~ 12 个月（或 0 个月）的总时长一律 400：数量下拉只给 1 ~ 12，服务端再兜一层
+  // 「时长单位」选「年」时数量是 1 ~ 5：5 年 = 60 个月，是能买的最长时长，价格同样由服务端算
+  const fiveYearBasic = await call('/api/quota/purchases', {
+    method: 'POST',
+    body: { kind: 'basic', count: 1, months: 60 },
+  });
+  check(
+    'a 5-year term (60 months, the longest) prices the purchase on the server',
+    fiveYearBasic.status === 201 &&
+      fiveYearBasic.data?.purchase?.months === 60 &&
+      // 基础 9.9 元/月 × 1 个 × 60 个月 = 59400 分
+      fiveYearBasic.data?.purchase?.amountCents === 990 * 60,
+    `status=${fiveYearBasic.status} months=${fiveYearBasic.data?.purchase?.months} amountCents=${fiveYearBasic.data?.purchase?.amountCents}`,
+  );
+  // 凑不出来的总时长一律 400：月只给 1 ~ 12、年只给 1 ~ 5（12 / 24 / 36 / 48 / 60 个月），
+  // 所以 13（中间值）、72（6 年）、0 都不在白名单里 —— 下拉框只给合法值，服务端再兜一层
   const tooLongMonths = await call('/api/quota/purchases', {
     method: 'POST',
     body: { kind: 'basic', count: 1, months: 13 },
@@ -343,10 +358,14 @@ async function main() {
     method: 'POST',
     body: { kind: 'basic', count: 1, months: 0 },
   });
+  const sixYearMonths = await call('/api/quota/purchases', {
+    method: 'POST',
+    body: { kind: 'basic', count: 1, months: 72 },
+  });
   check(
-    'only 1 ~ 12 month terms are accepted',
-    tooLongMonths.status === 400 && zeroMonths.status === 400,
-    `months=13 -> ${tooLongMonths.status} months=0 -> ${zeroMonths.status}`,
+    'only the 1 ~ 12 month and 1 ~ 5 year terms are accepted',
+    tooLongMonths.status === 400 && zeroMonths.status === 400 && sixYearMonths.status === 400,
+    `months=13 -> ${tooLongMonths.status} months=0 -> ${zeroMonths.status} months=72 -> ${sixYearMonths.status}`,
   );
 
   // ------------------------------- 会话兜底：Cookie 存不下来的手机浏览器（tokenInBody）
