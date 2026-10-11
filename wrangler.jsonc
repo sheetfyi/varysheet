@@ -35,8 +35,9 @@
   // 只是按 id 命名本地 sqlite 文件，填占位值也能跑）。也可以直接跑
   // `node scripts/sync-d1-ids.mjs --create`，它会按库名在本账户里查、查不到就现建，
   // 再把 id 回填到这里（CI 的部署步骤就是这么做的）。
-  // 仓库里只保存占位值：database_id 是**账户内**的资源 id，换账户 / 换库之后一律失效
-  // （`wrangler deploy` 会报 10181），所以这里不放任何具体账户的真实 id。
+  // 下面填**部署目标账户**下的真实 id：database_id 是账户内的资源 id，换账户 / 换库之后
+  // 旧值一律失效（`wrangler deploy` 会报 10181），所以这里只放目标账户的 id，别把
+  // 其它账户（比如测试账户）的 id 提交进来；本地 `wrangler dev --local` 允许占位值。
   // 迁移目录各自独立：control 目录放用户库的迁移，tables 目录放分片库的迁移
   // （两者结构完全不同，所以不能共用目录）。
   // 注意：数据库名属于基础设施标识，与站点品牌名（vars.APP_NAME）互不相关；
@@ -45,25 +46,25 @@
     {
       "binding": "DB",
       "database_name": "cloudnotion-db",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "f2d42bbe-dde4-442f-966e-2b4bbfd6a3d3",
       "migrations_dir": "migrations/control"
     },
     {
       "binding": "DB_TABLES_TRIAL",
       "database_name": "cloudnotion-tables-trial",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "32b2ce89-41a3-4881-a7dd-6e6da3fc2090",
       "migrations_dir": "migrations/tables"
     },
     {
       "binding": "DB_TABLES_BASIC",
       "database_name": "cloudnotion-tables-basic",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "a5ca773b-f41c-4b3b-9067-33c7f0e3db5d",
       "migrations_dir": "migrations/tables"
     },
     {
       "binding": "DB_TABLES_PRO",
       "database_name": "cloudnotion-tables-pro",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "546f5c6c-d699-4b2b-a17b-da5d3121118d",
       "migrations_dir": "migrations/tables"
     }
   ],
