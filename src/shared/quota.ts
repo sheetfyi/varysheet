@@ -20,14 +20,7 @@
  * （月 1 ~ 12 个、年 1 ~ 5 个），总月数 = 单位月数 × 数量（`tableKind.ts` 的 `PURCHASE_UNITS` /
  * `purchaseMonthsOf`）；服务端只认 `PURCHASE_MONTH_OPTIONS` 里那几档月数。
  */
-import {
-  DAY_MS,
-  MAX_PURCHASE_MONTHS,
-  MIN_PURCHASE_MONTHS,
-  asTableKind,
-  tableKindLabel,
-  tableKindPriceText,
-} from './tableKind';
+import { DAY_MS, asTableKind, tableKindLabel, tableKindPriceText } from './tableKind';
 import type { TableKind, TableQuota, TableQuotaSet } from './types';
 
 /**
@@ -130,17 +123,14 @@ export function slotExpiredHint(kind: TableKind | string | null | undefined, exp
 /**
  * 名额规则：侧边栏的说明弹窗原样展示，改口径时只改这里。
  *
- * 文案要求「一行一条、能扫读」：每条只说一件事，容量 / 保留期这类细节交给下面的对比表，
- * 这里不再重复（弹窗里的其它句子同理）。
+ * 文案要求「一行一条、能扫读」：**每条只讲这一类的名额怎么来、删了怎么算**；容量 / 保留期
+ * 交给下面的对比表，「已用 x/y，还剩几个」交给现状那几行，购买时长 / 续费 / 到期这些
+ * 购买区与对比表已经说清楚的事这里不再重复（弹窗里的其它句子同理）。
  */
 export const TABLE_QUOTA_RULES: string[] = [
-  '名额分三类独立计算：试用表格、基础表格、专业表格。',
-  `试用表格：注册赠送 1 个，把表格分享给一位新协作用户额外增加 1 个。（删除表格额度无法恢复，但试用表格全部删完后系统会再赠 1 个）`,
+  `试用表格：注册赠送1 个，分享你的表格给一位新协作用户额外增加1个。（删除表格额度无法恢复）`,
   `基础表格：需订阅，${tableKindPriceText('basic')}。（删除无法恢复，订阅费不返还）`,
   `专业表格：需订阅，${tableKindPriceText('pro')}。（删除无法恢复，订阅费不返还）`,
-  `购买时长 = 单位（月 1 个月 / 年 12 个月）× 数量（月 1 ~ 12，年 1 ~ 5），总时长 ${MIN_PURCHASE_MONTHS} ~ ${MAX_PURCHASE_MONTHS} 个月；金额 = 月单价 × 表格数量 × 总月数。`,
-  `基础表格与专业表格自带时长（从建表时的购买时长起算）：剩余不到 ${SLOT_RENEW_WINDOW_DAYS} 天时表格清单里会出现「续费」，续费和购买同价、同样走扫码支付。`,
-  '基础表格与专业表格到期没续费时数据都还在（查看、编辑、删除、分享照常），但不能添加新记录、也不能加新视图；续费后立即恢复。',
 ];
 
 function countOf(value: number | undefined): number {
