@@ -40,11 +40,11 @@ CLOUDFLARE_API_TOKEN=
 # 专业表格不限容量，这两个值对它没有影响。
 # 本地想快点试出「已满」效果，可以把记录数调小（比如 10）。
 MAX_DATABASE_RECORDS=500
+# 单表附件合计上限（MB）
+MAX_DATABASE_STORAGE_MB=1024
 # 试用表格的容量上限（默认 100 条记录 / 512MB 附件；专业表格不限）
 TRIAL_MAX_DATABASE_RECORDS=100
 TRIAL_MAX_DATABASE_STORAGE_MB=512
-# 单表附件合计上限（MB）
-MAX_DATABASE_STORAGE_MB=1024
 # 数据保留期（天）：**按「最后一次使用」（编辑 / 查询）算**，超期的记录与附件会被定时任务清除。
 #   试用表格：TRIAL_TABLE_RETENTION_DAYS，默认 365（1 年）
 #   基础表格：BASIC_TABLE_RETENTION_DAYS，默认 1825（5 年）

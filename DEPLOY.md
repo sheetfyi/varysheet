@@ -101,7 +101,6 @@ npm run deploy                 # vite build && wrangler deploy
 | `MAX_DATABASE_STORAGE_MB` | `1024` | **基础表格**的附件合计上限（MB，默认 1GB；专业表格不限）。附件上传超过这个总量、或表格已经满员时同样返回 `403 capacity_exceeded`；侧边栏每张表后面的硬盘图标（💾，点开有明细浮层）显示的就是这两项用量 |
 | `TRIAL_MAX_DATABASE_RECORDS` | `100` | **试用表格**的记录数上限（专业表格不限）：注册 / 邀请赠送的试用表格就是按这个上限给的，超了同样是 `403 capacity_exceeded` |
 | `TRIAL_MAX_DATABASE_STORAGE_MB` | `512` | **试用表格**的附件合计上限（MB，默认 0.5GB；专业表格不限） |
-
 | `BASIC_TABLE_RETENTION_DAYS` | `1825` | **基础表格**的数据保留期（天，默认 5 年）：**最后一次使用**（编辑或查询）超过这个时间的记录与附件（含 R2 对象）由定时任务自动清除（`triggers.crons` 每天 03:00 UTC；管理员也可以手动 `POST /api/admin/maintenance/retention`）。专业表格长期保留、不清理；设成 `0` 关闭自动清理（只建议本地调试） |
 | `TRIAL_TABLE_RETENTION_DAYS` | `365` | **试用表格**的数据保留期（天，默认 1 年）：口径同「最后一次使用」（编辑或查询），超期的记录与附件自动清除；设成 `0` 关闭试用表格的自动清理 |
 | `ALLOW_SIGNUP` | `true` | 设为 `"false"` 关闭公开注册（已有账号仍可登录） |
