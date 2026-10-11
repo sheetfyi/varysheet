@@ -1956,7 +1956,8 @@ server.listen(PORT, '127.0.0.1', () => {
 问题：冒烟测试是临时注册的 `smoke+...@example.com`，以前靠 `/api/quota/purchases` 白拿建表名额；
 线上配了 XorPay 之后这笔会变成 202（待支付），后面所有「建表」断言会连环失败。
 
-改法（只动 bootstrap 那一段，其余 271 项断言不动）：
+改法（只动 bootstrap 那一段，其余断言一条不动；开通收款后总数从 271 变成 **273**，
+多出的两条分别是「下单要在线支付（202 + 二维码）」与「管理员赠额兜底」）：
 
 ```js
   // 先用老的「购买」接口探一下：201 = 还没接支付（本地 / CI），202 = 线上已经要付钱了
@@ -2061,11 +2062,17 @@ curl.exe -X POST http://127.0.0.1:8788/__pay/<订单号>
 
 界面上应当看到：下单 → 出现二维码 → 3 秒内二维码消失、名额 +n、弹出「支付成功」。
 
-**第 3 步：本地回归（确保「没配支付」的老路径没坏）**
+**第 3 步：本地回归（两种模式都要绿）**
 
 ```bash
-npm run test:e2e        # 271 项断言（本地 wrangler dev 未配 XorPay ⇒ 购买仍是立即到账）
+# .dev.vars 里配了 XORPAY_*（第 2 步的状态），假网关开着
+npm run test:e2e        # 273 项断言：走假网关下单（202 + 二维码）+ 管理员赠额兜底发名额
+# 把 .dev.vars 里的 XORPAY_* 注释掉，重启 wrangler dev 再跑
+npm run test:e2e        # 271 项断言：没配支付 ⇒ 购买仍是立即到账（老路径没坏）
 ```
+
+> 两个数字都实测过：**271 = 未配支付**、**273 = 配了支付**。CI 的线上冒烟用同一套自适应逻辑，
+> 所以线上配不配 XorPay 都不会因此变红。
 
 **第 4 步：先部署「没有支付配置」的版本**
 推一次代码，让 CI 走完部署 + 线上冒烟（此时 `XORPAY_*` 还没配 ⇒ 线上行为与现在完全一致）。
@@ -2189,11 +2196,26 @@ npx wrangler secret delete XORPAY_APP_SECRET
 | 界面上二维码图片裂了 | `xorpay.com/qr` 在用户网络里被阻断 | 一期先让用户「复制二维码内容」；二期可引入本地二维码库（`qrcode`）在浏览器里画（会新增一个前端依赖，需要评估） |
 | 用户连点「去支付」生成多张订单 | 每次点击都新建订单（老单 120 分钟后过期） | 可接受（订单只是记录，不付款不产生名额）；要更严格就按「同一用户 + 同参数 + 最近 5 分钟内的 pending 单」复用 |
 
+> **CI 里「线上冒烟测试」红了怎么定位**（`deploy.yml`）：线上冒烟的完整日志留在 `/tmp/smoke-online.log`，
+> 失败时工作流会把**第一条 `FAIL` 行**写进 `deploy/cloudflare-workers` 这条 commit status 的
+> `description`（140 字符内），所以不登网页也能读：
+>
+> ```bash
+> curl -s "https://api.github.com/repos/<owner>/<repo>/commits/<sha>/statuses" | grep description
+> ```
+>
+> 同时新增的一步「线上冒烟失败时输出失败断言」会把日志最后 40 行 + `FAIL` 行打到 `::error` 注解与 job 日志里。
+> 注意：`the target runs the freshly deployed build` 这条红**通常只是新版本还没在边缘传播完**
+> （`wrangler deploy` 返回 ≠ 所有边缘实例都换了新代码），等 30 ~ 90 秒重跑即可，不是业务代码问题 ——
+> 实测遇到过一次：应用代码、迁移、部署全绿，仅该断言与随后的时序敏感断言红了，重跑即绿。
+
 ### 10.3 验收清单
 
 - [ ] `npm run typecheck` / `build:client` / `check:routes` / `check:scripts` / `schema:check` 全绿
 - [ ] 本地假网关：下单 → 二维码 → 模拟付款 → 名额到账（≤3 秒）
-- [ ] 本地未配支付：`npm run test:e2e` 271 项断言全绿（老行为没坏）
+- [ ] 本地未配支付：`npm run test:e2e` **271** 项断言全绿（老行为没坏）
+- [ ] 本地配假网关（`XORPAY_AID` / `XORPAY_APP_SECRET` / `XORPAY_API_BASE`）：`npm run test:e2e` **273** 项断言全绿
+      （多「下单要在线支付（202 + 二维码）」与「管理员赠额兜底」两条；已实测 273/273）
 - [ ] 伪造 `sign` 的回调被拒（400），订单仍 pending
 - [ ] 同一回调重发 3 次，名额只加一次
 - [ ] 少付 1 分：订单 `amount_mismatch`，名额不加
