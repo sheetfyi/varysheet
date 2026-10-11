@@ -8,12 +8,14 @@
  * `src/worker/retention.ts`）：
  *   容量     试用：100 条记录 / 0.5GB 附件   基础：500 条记录 / 1GB 附件   专业：不限
  *   存储时间 试用：半年（超期自动清除）        基础：1 年（超期自动清除）   专业：永久保留
- *   列数     试用：10 列                      基础：10 列                 专业：20 列
- *   视图数   试用：3 个                       基础：3 个                  专业：10 个
+ *   列数     试用：10 列                      基础：15 列                 专业：20 列
+ *   视图数   试用：3 个                       基础：5 个                  专业：10 个
  *   购买价格 试用：免费（不单卖）              基础：9.9 元/月             专业：99.9 元/月
  *
- * 购买价格写成「每月单价（分）」放在 §TABLE_KIND_META 里，购买时可以按月（1 个月）
- * 或按年（12 个月）买，金额 = 单价 × 数量 × 月数，见 §purchaseAmountCents。
+ * 购买价格写成「每月单价（分）」放在 §TABLE_KIND_META 里。购买时长按「单位 × 数量」选：
+ * 时长单位固定是「月」（`PURCHASE_UNIT_MONTHS`），时长数量可选 1 ~ 12 个
+ * （`PURCHASE_MONTH_UNITS`），总月数 = 单位月数 × 数量（`purchaseMonthsOf`），
+ * 金额 = 每月单价 × 购买数量 × 总月数（`purchaseAmountCents`）。
  *
  * 「不限」在数据里统一写成 0（`maxRecords <= 0` 即不限制），前端据此显示「不限」。
  */
@@ -63,12 +65,12 @@ export const TABLE_KIND_META: Record<TableKind, TableKindMeta> = {
     kind: 'basic',
     label: '基础表格',
     shortLabel: '基础',
-    summary: '500 条记录 / 1GB 附件，数据保留 1 年，最多 10 列 / 3 个视图',
+    summary: '500 条记录 / 1GB 附件，数据保留 1 年，最多 15 列 / 5 个视图',
     maxRecords: 500,
     maxStorageBytes: 1024 * BYTES_PER_MB, // 1GB
     retentionDays: 365, // 一年；超过一年的记录与附件会被定时任务清除
-    maxProperties: 10,
-    maxViews: 3,
+    maxProperties: 15,
+    maxViews: 5,
     monthlyPriceCents: 990, // 9.9 元/月
   },
   pro: {
@@ -154,10 +156,46 @@ export function tableKindCapacityText(kind: TableKind | string | null | undefine
 /* ------------------------------------------------------------ 购买价格与时长的口径 */
 
 /**
- * 购买时长可选项（月）：按月买 1 个月、按年买 12 个月。
- * 说明弹窗的时长下拉框、`POST /api/quota/purchases` 的白名单都用它。
+ * 购买时长的**单位**：固定按「月」计价（1 个单位 = 1 个月）。
+ * 说明弹窗里「时长单位」下拉就用它 —— 现在只放一个选项，以后要加「年」只在这里扩展。
  */
-export const PURCHASE_MONTHS: readonly number[] = [1, 12];
+export const PURCHASE_UNIT_MONTHS = 1;
+
+/**
+ * 「时长单位」下拉的选项：`key` 给 React 当 key、`label` 是显示名、
+ * `months` 是「一个单位等于几个月」。需求是时长以月为单位、多少个月由后面的
+ * 「时长数量」选，所以现在只有「月」这一项。
+ */
+export const PURCHASE_UNITS: readonly { key: string; label: string; months: number }[] = [
+  { key: 'month', label: '月', months: PURCHASE_UNIT_MONTHS },
+];
+
+/** 「时长数量」最多能选几个单位（单位是月 → 最多 12 个月，覆盖原来的「按年」） */
+export const MAX_PURCHASE_MONTH_UNITS = 12;
+
+/** 「时长数量」下拉的可选值：1 ~ 12 个（单位是月，所以就是 1 ~ 12 个月） */
+export const PURCHASE_MONTH_UNITS: readonly number[] = Array.from(
+  { length: MAX_PURCHASE_MONTH_UNITS },
+  (_unused, index) => index + 1,
+);
+
+/** 服务端认可的**总时长**下限（月）：单位 × 数量至少 1 个月 */
+export const MIN_PURCHASE_MONTHS = PURCHASE_UNIT_MONTHS;
+
+/** 服务端认可的**总时长**上限（月）：1 个月 × 12 个 = 12 个月 */
+export const MAX_PURCHASE_MONTHS = PURCHASE_UNIT_MONTHS * MAX_PURCHASE_MONTH_UNITS;
+
+/** 总月数 = 时长单位（月）× 时长数量；说明弹窗与 `POST /api/quota/purchases` 共用这一条算式 */
+export function purchaseMonthsOf(unitMonths: number, unitCount: number): number {
+  const unit = Number.isFinite(unitMonths) ? Math.max(1, Math.trunc(unitMonths)) : PURCHASE_UNIT_MONTHS;
+  const count = Number.isFinite(unitCount) ? Math.max(1, Math.trunc(unitCount)) : 1;
+  return unit * count;
+}
+
+/** 总时长能不能买：整数且落在 1 ~ `MAX_PURCHASE_MONTHS` 个月之间（服务端白名单） */
+export function isPurchasableMonths(months: number): boolean {
+  return Number.isInteger(months) && months >= MIN_PURCHASE_MONTHS && months <= MAX_PURCHASE_MONTHS;
+}
 
 /** 某一类的每月单价（分）；0 = 不单卖（试用表格） */
 export function tableKindMonthlyPriceCents(kind: TableKind | string | null | undefined): number {
@@ -177,11 +215,11 @@ export function tableKindPriceText(kind: TableKind | string | null | undefined):
   return cents > 0 ? `${formatPriceCents(cents)}/月` : '免费';
 }
 
-/** 「按月（1 个月）」/「按年（12 个月）」 */
+/** 总时长文案：`1 个月` / `12 个月（一年）`（购买提示、下拉框选项都用它） */
 export function purchaseMonthsLabel(months: number): string {
-  if (months === 12) return '按年（12 个月）';
-  if (months === 1) return '按月（1 个月）';
-  return `${months} 个月`;
+  if (!Number.isFinite(months)) return '时长未知';
+  const value = Math.max(0, Math.trunc(months));
+  return value === 12 ? '12 个月（一年）' : `${value} 个月`;
 }
 
 /** 一单金额（分）= 每月单价 × 数量 × 月数；试用表格（单价 0）恒为 0 */
@@ -249,12 +287,12 @@ export const TABLE_KIND_FEATURES: TableKindFeature[] = [
     label: '名额来源',
     trial: '注册送 1 个，邀请新用户 +1（不能购买）',
     basic: '只能购买（分享不赠额）',
-    pro: '分享 +1 / 购买',
+    pro: '只能购买（分享不赠额）',
   },
   {
     label: '价格',
     trial: '免费（注册就送 1 个）',
-    basic: `${tableKindPriceText('basic')}，可按月 / 按年购买`,
-    pro: `${tableKindPriceText('pro')}，可按月 / 按年购买`,
+    basic: `${tableKindPriceText('basic')}，按时长购买（单位月 × 时长数量）`,
+    pro: `${tableKindPriceText('pro')}，按时长购买（单位月 × 时长数量）`,
   },
 ];

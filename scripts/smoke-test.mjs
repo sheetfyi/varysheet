@@ -320,27 +320,33 @@ async function main() {
       bootstrapPro.data?.quota?.pro?.remaining === 1,
     `purchased=${bootstrapPro.data?.quota?.pro?.purchased} remaining=${bootstrapPro.data?.quota?.pro?.remaining}`,
   );
-  // 购买时长：按月（1 个月）/ 按年（12 个月）都行，别的一律 400（白名单是 shared/tableKind.ts 的 PURCHASE_MONTHS）
-  const yearlyPro = await call('/api/quota/purchases', {
+  // 购买时长：时长单位固定是「月」，后面再选时长数量（1 ~ 12 个）→ 总时长 1 ~ 12 个月；
+  // 白名单是 shared/tableKind.ts 的 `isPurchasableMonths`，金额 = 每月单价 × 数量 × 总月数
+  const longTermPro = await call('/api/quota/purchases', {
     method: 'POST',
     body: { kind: 'pro', count: 1, months: 12 },
   });
   check(
-    'buying by the year prices the purchase on the server',
-    yearlyPro.status === 201 &&
-      yearlyPro.data?.purchase?.months === 12 &&
+    'a 12-month term prices the purchase on the server',
+    longTermPro.status === 201 &&
+      longTermPro.data?.purchase?.months === 12 &&
       // 专业 99.9 元/月 × 1 个 × 12 个月 = 119880 分
-      yearlyPro.data?.purchase?.amountCents === 9990 * 12,
-    `months=${yearlyPro.data?.purchase?.months} amountCents=${yearlyPro.data?.purchase?.amountCents}`,
+      longTermPro.data?.purchase?.amountCents === 9990 * 12,
+    `months=${longTermPro.data?.purchase?.months} amountCents=${longTermPro.data?.purchase?.amountCents}`,
   );
-  const oddMonths = await call('/api/quota/purchases', {
+  // 超出 1 ~ 12 个月（或 0 个月）的总时长一律 400：数量下拉只给 1 ~ 12，服务端再兜一层
+  const tooLongMonths = await call('/api/quota/purchases', {
     method: 'POST',
-    body: { kind: 'basic', count: 1, months: 3 },
+    body: { kind: 'basic', count: 1, months: 13 },
+  });
+  const zeroMonths = await call('/api/quota/purchases', {
+    method: 'POST',
+    body: { kind: 'basic', count: 1, months: 0 },
   });
   check(
-    'only monthly / yearly terms are accepted',
-    oddMonths.status === 400,
-    `status=${oddMonths.status} message=${oddMonths.data?.error?.message ?? ''}`,
+    'only 1 ~ 12 month terms are accepted',
+    tooLongMonths.status === 400 && zeroMonths.status === 400,
+    `months=13 -> ${tooLongMonths.status} months=0 -> ${zeroMonths.status}`,
   );
 
   // ------------------------------- 会话兜底：Cookie 存不下来的手机浏览器（tokenInBody）
@@ -405,7 +411,7 @@ async function main() {
   // ------------------------------------------------------------- table + fields
   section('tables and fields');
   // 这张主测试表用**专业表格**：后面几段会往它上面加 6 个视图、十个左右字段，
-  // 基础表格的 3 视图 / 10 列上限放不下（基础表格的上限在「table quota」一段专门验证）。
+  // 基础表格的 5 视图 / 15 列上限放不下（基础表格的上限在「table quota」一段专门验证）。
   const created = await call('/api/databases', {
     method: 'POST',
     body: { name: 'Smoke 表格', templateId: 'task', kind: 'pro' },
@@ -2071,7 +2077,7 @@ async function main() {
     quotaBefore.status === 200 &&
       typeof beforeQuota?.basic?.remaining === 'number' &&
       typeof beforeQuota?.pro?.remaining === 'number' &&
-      // 没有默认名额：总名额 = 分享得到的 + 购买来的
+      // 没有默认名额：总名额 = 赠额（只有试用表格有）+ 购买来的
       beforeQuota?.basic?.total === (beforeQuota?.basic?.shared ?? 0) + (beforeQuota?.basic?.purchased ?? 0) &&
       beforeQuota?.pro?.total === (beforeQuota?.pro?.shared ?? 0) + (beforeQuota?.pro?.purchased ?? 0) &&
       beforeQuota?.basic?.remaining === Math.max(0, (beforeQuota?.basic?.total ?? 0) - (beforeQuota?.basic?.used ?? 0)),
@@ -2170,8 +2176,8 @@ async function main() {
     `unlimited=${proCapacity?.unlimited} maxRecords=${proCapacity?.maxRecords} retentionDays=${proCapacity?.retentionDays}`,
   );
 
-  // 分享的赠额：**只有专业表格**分享出去才 +1 个同类型名额；基础表格分享不再加名额
-  // （口径见 shared/quota.ts：基础表格名额只能购买）
+  // 分享不再送名额：基础表格与专业表格分享出去都不加名额
+  // （口径见 shared/quota.ts：基础 / 专业表格的名额只能购买）
   const beforeShare = (await call('/api/quota')).data?.quota;
   const quotaShare = await call(`/api/databases/${quotaTable.data?.id}/shares`, {
     method: 'POST',
@@ -2188,7 +2194,7 @@ async function main() {
     `status=${quotaShare.status} shared=${beforeShare?.basic?.shared}->${afterShare?.basic?.shared} remaining=${beforeShare?.basic?.remaining}->${afterShare?.basic?.remaining}`,
   );
 
-  // 专业表格相反：分享一次（公开链接）就多一个专业名额；验证完顺手删掉链接，别影响后面的断言
+  // 专业表格同样不再靠分享加名额：分享一次（公开链接）名额不变；验证完顺手删掉链接，别影响后面的断言
   const beforeProShare = (await call('/api/quota')).data?.quota;
   const proShare = await call(`/api/databases/${proTable.data?.id}/shares`, {
     method: 'POST',
@@ -2196,18 +2202,19 @@ async function main() {
   });
   const afterProShare = (await call('/api/quota')).data?.quota;
   check(
-    'sharing a pro table grants one more pro slot',
+    'sharing a pro table does not grant a slot either',
     proShare.status === 201 &&
-      afterProShare?.pro?.shared === (beforeProShare?.pro?.shared ?? 0) + 1 &&
-      afterProShare?.pro?.total === (beforeProShare?.pro?.total ?? 0) + 1 &&
-      afterProShare?.pro?.remaining === (beforeProShare?.pro?.remaining ?? 0) + 1 &&
-      // 分享专业表格不会动到基础表格的名额
+      afterProShare?.pro?.shared === beforeProShare?.pro?.shared &&
+      afterProShare?.pro?.total === beforeProShare?.pro?.total &&
+      afterProShare?.pro?.remaining === beforeProShare?.pro?.remaining &&
+      afterProShare?.pro?.purchased === beforeProShare?.pro?.purchased &&
+      // 分享专业表格同样不会动到基础表格的名额
       afterProShare?.basic?.remaining === beforeProShare?.basic?.remaining,
     `status=${proShare.status} shared=${beforeProShare?.pro?.shared}->${afterProShare?.pro?.shared} remaining=${beforeProShare?.pro?.remaining}->${afterProShare?.pro?.remaining}`,
   );
   await call(`/api/shares/${(proShare.data?.shares ?? [])[0]?.id}`, { method: 'DELETE' });
 
-  // 列数上限：基础表格 10 列、专业表格 20 列（空白表自带「名称」一列，只拦新增）
+  // 列数上限：基础表格 15 列、专业表格 20 列（空白表自带「名称」一列，只拦新增）
   const addColumn = (databaseId, name) =>
     call(`/api/databases/${databaseId}/properties`, { method: 'POST', body: { name, type: 'text' } });
   const fillColumns = async (databaseId, already, limit) => {
@@ -2221,10 +2228,10 @@ async function main() {
     return { columns, blocked };
   };
 
-  const basicColumns = await fillColumns(quotaTable.data?.id, (quotaTable.data?.properties ?? []).length, 10);
+  const basicColumns = await fillColumns(quotaTable.data?.id, (quotaTable.data?.properties ?? []).length, 15);
   check(
-    'a basic table stops at 10 columns',
-    basicColumns.columns === 10 &&
+    'a basic table stops at 15 columns',
+    basicColumns.columns === 15 &&
       basicColumns.blocked?.status === 403 &&
       basicColumns.blocked?.data?.error?.code === 'limit_exceeded',
     `columns=${basicColumns.columns} status=${basicColumns.blocked?.status} code=${basicColumns.blocked?.data?.error?.code ?? ''}`,
@@ -2239,7 +2246,7 @@ async function main() {
     `columns=${proColumns.columns} status=${proColumns.blocked?.status} code=${proColumns.blocked?.data?.error?.code ?? ''}`,
   );
 
-  // 视图数上限：基础表格 3 个、专业表格 10 个（新建表格自带 1 个「全部数据」）
+  // 视图数上限：基础表格 5 个、专业表格 10 个（新建表格自带 1 个「全部数据」）
   const addView = (databaseId, name) =>
     call(`/api/databases/${databaseId}/views`, { method: 'POST', body: { type: 'table', name } });
   const fillViews = async (databaseId, already, limit) => {
@@ -2253,10 +2260,10 @@ async function main() {
     return { views, blocked };
   };
 
-  const basicViews = await fillViews(quotaTable.data?.id, (quotaTable.data?.views ?? []).length, 3);
+  const basicViews = await fillViews(quotaTable.data?.id, (quotaTable.data?.views ?? []).length, 5);
   check(
-    'a basic table stops at 3 views',
-    basicViews.views === 3 &&
+    'a basic table stops at 5 views',
+    basicViews.views === 5 &&
       basicViews.blocked?.status === 403 &&
       basicViews.blocked?.data?.error?.code === 'limit_exceeded',
     `views=${basicViews.views} status=${basicViews.blocked?.status} code=${basicViews.blocked?.data?.error?.code ?? ''}`,

@@ -266,13 +266,11 @@ export const api = {
   /** 表格名额（试用 / 基础 / 专业各自还能加几张）：侧边栏的数字 + 数量说明弹窗 */
   quota: () => json<{ quota: TableQuotaSet }>('/api/quota', 'GET'),
   /**
-   * 购买表格名额：买几个就多几个可添加的表格（可选基础表格 / 专业表格）。
+   * 购买表格名额：买几个就多几个可添加的表格（可选基础表格 / 专业表格），
    * 支付还没接入，服务端会立刻写一条购买流水并加名额。
-   */
-  /**
-   * 购买表格名额（基础 9.9 元/月、专业 99.9 元/月）：`months` 是购买时长
-   * （1 = 按月、12 = 按年，见 shared/tableKind.ts 的 `PURCHASE_MONTHS`），
-   * 金额由服务端按「每月单价 × 数量 × 月数」算好写进流水。
+   * 基础 9.9 元/月、专业 99.9 元/月：`months` 是**总购买时长**
+   * （时长单位固定是「月」，时长数量 1 ~ 12 个 → 1 ~ 12 个月，见 shared/tableKind.ts 的
+   * `purchaseMonthsOf`），金额由服务端按「每月单价 × 数量 × 月数」算好写进流水。
    */
   purchaseQuota: (body: { kind: TableKind; count: number; months: number; note?: string }) =>
     json<{ quota: TableQuotaSet; purchase: TablePurchase }>('/api/quota/purchases', 'POST', body),

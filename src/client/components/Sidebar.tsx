@@ -15,7 +15,6 @@ import {
 } from '../../shared/capacity';
 import {
   MAX_PURCHASE_COUNT,
-  SHARE_TABLE_QUOTA,
   quotaSetFromUsed,
   TABLE_QUOTA_RULES,
   tableQuotaHasRoom,
@@ -24,11 +23,14 @@ import {
 } from '../../shared/quota';
 import {
   BUYABLE_TABLE_KINDS,
-  PURCHASE_MONTHS,
+  PURCHASE_MONTH_UNITS,
+  PURCHASE_UNITS,
+  PURCHASE_UNIT_MONTHS,
   TABLE_KIND_FEATURES,
   TABLE_KINDS,
   asTableKind,
   purchaseMonthsLabel,
+  purchaseMonthsOf,
   purchasePriceText,
   tableKindCapacityText,
   tableKindMeta,
@@ -313,8 +315,8 @@ function KindCapacityTag({
 }
 
 /**
- * 「表格数量说明」弹窗：讲清名额规则（三类分开算、试用靠邀请新用户 +1、基础只能购买、
- * 专业每分享一次 +1）+ 购买入口（类型 / 时长 / 数量 + 价格明细），外加一张「试用表格 /
+ * 「表格数量说明」弹窗：讲清名额规则（三类分开算、试用靠邀请新用户 +1、基础 / 专业都只能
+ * 购买）+ 购买入口（类型 / 时长单位 / 时长数量 / 购买数量 + 价格明细），外加一张「试用表格 /
  * 基础表格 / 专业表格的功能区别（含价格）」对比表。
  *
  * 数量都是服务端下发的权威值（口径见 `src/shared/quota.ts`）。购买走 App 传进来的
@@ -331,11 +333,15 @@ function QuotaDialog({
 }) {
   const [kind, setKind] = useState<TableKind>('basic');
   const [count, setCount] = useState(1);
-  /** 购买时长（月）：按月 1 / 按年 12（见 shared/tableKind.ts 的 `PURCHASE_MONTHS`） */
-  const [months, setMonths] = useState(1);
+  /** 购买时长的**单位**（一个单位等于几个月）：现在是「月」（见 shared/tableKind.ts 的 `PURCHASE_UNITS`） */
+  const [unitMonths, setUnitMonths] = useState(PURCHASE_UNIT_MONTHS);
+  /** 购买时长的**数量**（选几个单位）：单位是月，所以选 1 就是买 1 个月 */
+  const [unitCount, setUnitCount] = useState(1);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const meta = tableKindMeta(kind);
+  /** 总购买时长（月）= 时长单位 × 时长数量；服务端按它算价（`purchaseMonthsOf`） */
+  const months = purchaseMonthsOf(unitMonths, unitCount);
 
   const submit = async () => {
     if (busy) return;
@@ -408,10 +414,21 @@ function QuotaDialog({
           </select>
         </label>
         <label className="field">
-          <span>购买时长</span>
-          {/* 按月（1 个月）/ 按年（12 个月）：金额 = 每月单价 × 数量 × 月数 */}
-          <select className="input" value={months} onChange={(event) => setMonths(Number(event.target.value))}>
-            {PURCHASE_MONTHS.map((value) => (
+          <span>时长单位</span>
+          {/* 购买时长以「月」为单位（shared/tableKind.ts 的 PURCHASE_UNITS）；以后加「年」只改那里 */}
+          <select className="input" value={unitMonths} onChange={(event) => setUnitMonths(Number(event.target.value))}>
+            {PURCHASE_UNITS.map((unit) => (
+              <option key={unit.key} value={unit.months}>
+                {unit.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="field">
+          <span>时长数量</span>
+          {/* 选几个单位：单位是月，所以「1」= 1 个月、「12」= 12 个月（= 一年） */}
+          <select className="input" value={unitCount} onChange={(event) => setUnitCount(Number(event.target.value))}>
+            {PURCHASE_MONTH_UNITS.map((value) => (
               <option key={value} value={value}>
                 {purchaseMonthsLabel(value)}
               </option>
@@ -440,11 +457,10 @@ function QuotaDialog({
         选中的是「{meta.label}」：买几个就多几个可添加的{meta.label}名额（{tableKindCapacityText(kind)}）。
         支付还没接入，点「购买」会立刻加名额并记一条购买流水。
       </p>
-      {/* 名额来源提示：基础表格只能购买（分享不加），专业表格分享也能 +1（口径见 shared/quota.ts） */}
+      {/* 名额来源提示：基础表格与专业表格都只能购买（分享不加，口径见 shared/quota.ts） */}
       <p className="small muted">
-        {kind === 'pro'
-          ? `专业表格每分享一次（视图定向分享 / 公开链接 / 协作者）可添加数量 +${SHARE_TABLE_QUOTA}，也可以购买。`
-          : '基础表格没有赠送名额，分享也不增加，只能购买。'}
+        基础表格与专业表格都没有赠送名额（分享也不增加），只能购买：买几个就多几个可添加的
+        {meta.label}。
       </p>
       {error ? <p className="error small">{error}</p> : null}
     </Modal>
@@ -496,7 +512,7 @@ export function Sidebar({
   const [name, setName] = useState('');
   /**
    * 新建表格的类型（试用 / 基础 / 专业表格）：名额按类型扣。
-   * 默认给免费的试用表格 —— 新账号只有 1 个试用名额，基础要购买、专业可以分享或购买。
+   * 默认给免费的试用表格 —— 新账号只有 1 个试用名额，基础 / 专业都要购买。
    */
   const [kind, setKind] = useState<TableKind>('trial');
   const [busy, setBusy] = useState(false);
@@ -523,7 +539,7 @@ export function Sidebar({
   const addableTotal = tableQuotaRemaining(quotaView);
   /** 三类名额都空了（合计剩余 0）才把「添加」按钮置灰：还能邀请新用户注册或购买名额 */
   const addDisabled = addableTotal <= 0;
-  /** 当前选中的类型没有名额了：创建按钮置灰，提示先邀请（试用）/ 购买（基础）/ 分享或购买（专业） */
+  /** 当前选中的类型没有名额了：创建按钮置灰，提示先邀请（试用）/ 购买（基础 / 专业） */
   const kindHasRoom = tableQuotaHasRoom(quotaView, kind);
 
   const submit = async (event: React.FormEvent) => {

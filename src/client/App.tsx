@@ -379,7 +379,7 @@ export function App() {
 
   const refreshList = useCallback(async () => {
     try {
-      // 列表和名额一起刷新：分享出去一张表（名额 +1）、删掉一张表（名额 -1）后
+      // 列表和名额一起刷新：建表 / 删表（名额 -1 / +1）、买完名额后
       // 侧边栏底部的数字要跟着变
       const [result, nextQuota] = await Promise.all([
         api.listDatabases(),

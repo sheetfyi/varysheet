@@ -607,7 +607,7 @@ async function createHandler(ctx: RequestContext): Promise<Response> {
   const kind = asEnum(body.kind ?? 'basic', TABLE_KINDS, '表格类型');
   const template = TEMPLATES.find((item) => item.id === templateId);
   if (!template) throw notFound('模板不存在');
-  // 模板自带的列数也不能超过这一类型的上限（基础 10 列 / 专业 20 列）
+  // 模板自带的列数也不能超过这一类型的上限（基础 15 列 / 专业 20 列）
   const meta = tableKindMeta(kind);
   if (template.properties.length > meta.maxProperties) {
     throw badRequest(
@@ -620,15 +620,13 @@ async function createHandler(ctx: RequestContext): Promise<Response> {
   // 名额口径见 src/shared/quota.ts（新注册账号默认 0 个基础 / 专业名额，送 1 个试用名额）：
   //   试用表格不卖，只能靠邀请新用户注册 +1（见 worker/trialGrants.ts）；
   //   基础表格没有赠额（分享也不加），只能购买；
-  //   专业表格每分享一次 +1，也可以购买。
+  //   专业表格也没有赠额（分享不再 +1），只能购买。
   const quota = await loadTableQuota(ctx.env, user.id);
   if (quota[kind].remaining <= 0) {
     const replenish =
       kind === 'trial'
         ? '每成功邀请一位新用户注册可以 +1（试用表格不能购买）'
-        : kind === 'basic'
-          ? '基础表格只能购买名额（分享不增加名额）'
-          : '分享专业表格可以 +1，也可以直接购买名额';
+        : '只能购买名额（分享不增加名额）';
     throw forbidden(
       `${tableKindLabel(kind)}名额已用完（共 ${quota[kind].total} 个）：${replenish}`,
       QUOTA_EXCEEDED,

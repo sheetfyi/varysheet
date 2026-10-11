@@ -316,8 +316,8 @@ export interface CellEditLocks {
  * 三类的区别（口径见 `src/shared/tableKind.ts`）：
  *   容量     试用：100 条记录 / 0.5GB 附件   基础：500 条记录 / 1GB 附件   专业：不限
  *   存储时间 试用：半年（超期自动清除）        基础：1 年（超期自动清除）    专业：永久保留
- *   列数     试用：10 列                      基础：10 列                 专业：20 列
- *   视图数   试用：3 个                       基础：3 个                  专业：10 个
+ *   列数     试用：10 列                      基础：15 列                 专业：20 列
+ *   视图数   试用：3 个                       基础：5 个                  专业：10 个
  * 名额也按类型分开算（见下面的 `TableQuotaSet`）。
  */
 export type TableKind = 'trial' | 'basic' | 'pro';
@@ -361,8 +361,8 @@ export interface DatabaseCapacity {
  *   - 试用表格：新注册账号就送 1 个（一人一张免费试用表，见 `BASE_TABLE_QUOTA`）；
  *     每成功邀请一位**新用户**注册再多 1 个（`trial_table_grants` 表），不单卖；
  *   - 基础表格：没有赠送名额（**分享也不加**），只能购买（9.9 元/月）；
- *   - 专业表格：每分享一次表格（视图定向分享 / 公开链接 / 协作者）多 1 个，也可以购买
- *     （99.9 元/月）；购买时可以选择时长（按月 / 按年）。
+ *   - 专业表格：同样没有赠送名额（**分享也不加**），只能购买（99.9 元/月）。
+ * 购买时长按「单位 × 数量」选：时长单位固定是「月」，时长数量 1 ~ 12 个（总月数 = 1 × 数量）。
  * 「已用」只算自己拥有的、未归档的、这一类型的表格，别人分享给你的表不算。
  */
 export interface TableQuota {
@@ -372,14 +372,13 @@ export interface TableQuota {
   used: number;
   /**
    * 赠额：
-   *   - 专业表格：这一类表格被分享出去的次数（视图定向分享 + 公开链接 + 协作者，各算一次）；
    *   - 试用表格：成功邀请新用户注册得到的赠额（每邀请一位新用户 +1，见 `trial_table_grants`）；
-   *   - 基础表格：恒为 0（分享不赠额，名额只能购买）。
+   *   - 基础 / 专业表格：恒为 0（分享不赠额，名额只能购买）。
    */
   shared: number;
   /** 这一类通过购买得到的名额（`table_purchases` 里同类型的 count 之和；试用表格恒为 0） */
   purchased: number;
-  /** 总名额 = 默认（试用 1 / 其它 0）+ 分享或邀请赠额 + 已购买 */
+  /** 总名额 = 默认（试用 1 / 其它 0）+ 赠额（只有试用表格有，来自邀请新用户）+ 已购买 */
   total: number;
   /** 还能再添加几张（用完为 0，不会出现负数） */
   remaining: number;
@@ -398,7 +397,8 @@ export interface TableQuotaSet {
  * 立刻加名额，以后接支付时把订单号写进 `channel` / `note` 即可。
  *
  * 价格口径见 `src/shared/tableKind.ts`：基础表格 9.9 元/月、专业表格 99.9 元/月，
- * 购买时可以按月（1 个月）或按年（12 个月）买，`amountCents` = 单价 × 数量 × 月数。
+ * 购买时长按「单位 × 数量」选（单位固定是「月」，数量 1 ~ 12 个），
+ * `amountCents` = 每月单价 × 购买数量 × 总月数。
  */
 export interface TablePurchase {
   id: string;
@@ -406,7 +406,7 @@ export interface TablePurchase {
   kind: TableKind;
   /** 这次买了几个名额 */
   count: number;
-  /** 购买时长（月）：1 = 按月、12 = 按年（可选值见 `tableKind.ts` 的 `PURCHASE_MONTHS`） */
+  /** 总购买时长（月）= 时长单位（1 个月）× 时长数量（1 ~ 12，见 `tableKind.ts` 的 `purchaseMonthsOf`） */
   months: number;
   /** 这一单的金额（分） */
   amountCents: number;
