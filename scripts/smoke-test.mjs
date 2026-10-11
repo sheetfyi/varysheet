@@ -278,9 +278,12 @@ async function main() {
     bootstrapSlots.status === 201 &&
       bootstrapSlots.data?.purchase?.kind === 'basic' &&
       bootstrapSlots.data?.purchase?.count === 10 &&
+      // 金额由服务端算：基础 9.9 元/月 × 10 个 × 1 个月 = 9900 分（客户端传什么价都不作数）
+      bootstrapSlots.data?.purchase?.months === 1 &&
+      bootstrapSlots.data?.purchase?.amountCents === 990 * 10 &&
       bootstrapSlots.data?.quota?.basic?.purchased === 10 &&
       bootstrapSlots.data?.quota?.basic?.remaining === 10,
-    `purchased=${bootstrapSlots.data?.quota?.basic?.purchased} remaining=${bootstrapSlots.data?.quota?.basic?.remaining}`,
+    `purchased=${bootstrapSlots.data?.quota?.basic?.purchased} remaining=${bootstrapSlots.data?.quota?.basic?.remaining} months=${bootstrapSlots.data?.purchase?.months} amountCents=${bootstrapSlots.data?.purchase?.amountCents}`,
   );
   // 主测试表是专业表格，再买 1 个专业名额（「名额不够」的 403 在 table quota 一段验）
   const bootstrapPro = await call('/api/quota/purchases', { method: 'POST', body: { kind: 'pro', count: 1 } });
@@ -290,6 +293,28 @@ async function main() {
       bootstrapPro.data?.quota?.pro?.purchased === 1 &&
       bootstrapPro.data?.quota?.pro?.remaining === 1,
     `purchased=${bootstrapPro.data?.quota?.pro?.purchased} remaining=${bootstrapPro.data?.quota?.pro?.remaining}`,
+  );
+  // 购买时长：按月（1 个月）/ 按年（12 个月）都行，别的一律 400（白名单是 shared/tableKind.ts 的 PURCHASE_MONTHS）
+  const yearlyPro = await call('/api/quota/purchases', {
+    method: 'POST',
+    body: { kind: 'pro', count: 1, months: 12 },
+  });
+  check(
+    'buying by the year prices the purchase on the server',
+    yearlyPro.status === 201 &&
+      yearlyPro.data?.purchase?.months === 12 &&
+      // 专业 99.9 元/月 × 1 个 × 12 个月 = 119880 分
+      yearlyPro.data?.purchase?.amountCents === 9990 * 12,
+    `months=${yearlyPro.data?.purchase?.months} amountCents=${yearlyPro.data?.purchase?.amountCents}`,
+  );
+  const oddMonths = await call('/api/quota/purchases', {
+    method: 'POST',
+    body: { kind: 'basic', count: 1, months: 3 },
+  });
+  check(
+    'only monthly / yearly terms are accepted',
+    oddMonths.status === 400,
+    `status=${oddMonths.status} message=${oddMonths.data?.error?.message ?? ''}`,
   );
 
   // ------------------------------- 会话兜底：Cookie 存不下来的手机浏览器（tokenInBody）
@@ -2119,7 +2144,8 @@ async function main() {
     `unlimited=${proCapacity?.unlimited} maxRecords=${proCapacity?.maxRecords} retentionDays=${proCapacity?.retentionDays}`,
   );
 
-  // 分享出去一次（公开链接）就多一个**同类型**的可添加名额
+  // 分享的赠额：**只有专业表格**分享出去才 +1 个同类型名额；基础表格分享不再加名额
+  // （口径见 shared/quota.ts：基础表格名额只能购买）
   const beforeShare = (await call('/api/quota')).data?.quota;
   const quotaShare = await call(`/api/databases/${quotaTable.data?.id}/shares`, {
     method: 'POST',
@@ -2127,15 +2153,33 @@ async function main() {
   });
   const afterShare = (await call('/api/quota')).data?.quota;
   check(
-    'sharing a basic table grants one more basic slot',
+    'sharing a basic table no longer grants a slot',
     quotaShare.status === 201 &&
-      afterShare?.basic?.shared === (beforeShare?.basic?.shared ?? 0) + 1 &&
-      afterShare?.basic?.total === (beforeShare?.basic?.total ?? 0) + 1 &&
-      afterShare?.basic?.remaining === (beforeShare?.basic?.remaining ?? 0) + 1 &&
-      // 分享基础表格不会动到专业表格的名额
+      afterShare?.basic?.shared === beforeShare?.basic?.shared &&
+      afterShare?.basic?.total === beforeShare?.basic?.total &&
+      afterShare?.basic?.remaining === beforeShare?.basic?.remaining &&
       afterShare?.pro?.remaining === beforeShare?.pro?.remaining,
     `status=${quotaShare.status} shared=${beforeShare?.basic?.shared}->${afterShare?.basic?.shared} remaining=${beforeShare?.basic?.remaining}->${afterShare?.basic?.remaining}`,
   );
+
+  // 专业表格相反：分享一次（公开链接）就多一个专业名额；验证完顺手删掉链接，别影响后面的断言
+  const beforeProShare = (await call('/api/quota')).data?.quota;
+  const proShare = await call(`/api/databases/${proTable.data?.id}/shares`, {
+    method: 'POST',
+    body: { permission: 'view' },
+  });
+  const afterProShare = (await call('/api/quota')).data?.quota;
+  check(
+    'sharing a pro table grants one more pro slot',
+    proShare.status === 201 &&
+      afterProShare?.pro?.shared === (beforeProShare?.pro?.shared ?? 0) + 1 &&
+      afterProShare?.pro?.total === (beforeProShare?.pro?.total ?? 0) + 1 &&
+      afterProShare?.pro?.remaining === (beforeProShare?.pro?.remaining ?? 0) + 1 &&
+      // 分享专业表格不会动到基础表格的名额
+      afterProShare?.basic?.remaining === beforeProShare?.basic?.remaining,
+    `status=${proShare.status} shared=${beforeProShare?.pro?.shared}->${afterProShare?.pro?.shared} remaining=${beforeProShare?.pro?.remaining}->${afterProShare?.pro?.remaining}`,
+  );
+  await call(`/api/shares/${(proShare.data?.shares ?? [])[0]?.id}`, { method: 'DELETE' });
 
   // 列数上限：基础表格 10 列、专业表格 20 列（空白表自带「名称」一列，只拦新增）
   const addColumn = (databaseId, name) =>
