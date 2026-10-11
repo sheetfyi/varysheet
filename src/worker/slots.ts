@@ -13,23 +13,12 @@
  *
  * 这里不导入任何 `routes/*`（避免循环依赖）；只依赖用户库、共享口径与分片定位。
  */
-import { addMonths, slotRenewable } from '../shared/quota';
+import { addMonths } from '../shared/quota';
 import { asTableKind } from '../shared/tableKind';
 import type { TableKind } from '../shared/types';
 import { newId, sqlNumber, sqlString, type SqlRow } from './http';
 import { databaseDb } from './shards';
 import type { Env } from './types';
-
-/** 一张基础 / 专业表格的时长记录 */
-export interface SlotAllocation {
-  databaseId: string;
-  userId: string;
-  kind: TableKind;
-  /** 建表 / 上次续费时用的时长（月） */
-  months: number;
-  /** 到期时刻（毫秒）；0 = 没有时长记录（迁移前建的老表） */
-  expiresAt: number;
-}
 
 /** 续费的目标表格（下单前的校验结果） */
 export interface RenewTarget {
@@ -162,11 +151,6 @@ export async function renewSlot(
     .bind(input.databaseId, input.userId, kind, months, expiresAt, now, now)
     .run();
   return expiresAt;
-}
-
-/** 这张表现在该不该显示「续费」：有时长记录、且剩余不超过一周（已过期也算） */
-export function slotNeedsRenewal(allocation: SlotAllocation | undefined, now = Date.now()): boolean {
-  return allocation ? slotRenewable(allocation.expiresAt, now) : false;
 }
 
 /**
