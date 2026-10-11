@@ -159,7 +159,7 @@ UPDATE table_orders SET status = 'paid', paid_at = ? WHERE id = ? AND status <> 
 
 **决策 4：没有配 XorPay 时怎么办（本地开发 / CI / 还没拿到资质）**
 `XORPAY_AID` + `XORPAY_APP_SECRET` 没配 → 沿用现在的**自助直通**（下单即交付、`channel = 'self-serve'`）。
-这样 `scripts/smoke-test.mjs` 的 278 项断言、本地开发、以及「资质还在审核」的阶段都不受影响；
+这样 `scripts/smoke-test.mjs` 的 288 项断言、本地开发、以及「资质还在审核」的阶段都不受影响；
 一旦两个 secret 配好，同一条下单接口自动变成「返回二维码、等支付」。
 
 **决策 5：线上冒烟测试怎么建表（支付一旦开启，就没有免费名额了）**
@@ -1956,7 +1956,7 @@ server.listen(PORT, '127.0.0.1', () => {
 问题：冒烟测试是临时注册的 `smoke+...@example.com`，以前靠 `/api/quota/purchases` 白拿建表名额；
 线上配了 XorPay 之后这笔会变成 202（待支付），后面所有「建表」断言会连环失败。
 
-改法（只动 bootstrap 那一段，其余断言一条不动；开通收款后总数从 278 变成 **280**，
+改法（只动 bootstrap 那一段，其余断言一条不动；开通收款后总数从 288 变成 **290**，
 多出的两条分别是「下单要在线支付（202 + 二维码）」与「管理员赠额兜底」）：
 
 ```js
@@ -2066,12 +2066,13 @@ curl.exe -X POST http://127.0.0.1:8788/__pay/<订单号>
 
 ```bash
 # .dev.vars 里配了 XORPAY_*（第 2 步的状态），假网关开着
-npm run test:e2e        # 280 项断言：走假网关下单（202 + 二维码）+ 管理员赠额兜底发名额
+npm run test:e2e        # 290 项断言：走假网关下单（202 + 二维码）+ 管理员赠额兜底发名额
 # 把 .dev.vars 里的 XORPAY_* 注释掉，重启 wrangler dev 再跑
-npm run test:e2e        # 278 项断言：没配支付 ⇒ 购买仍是立即到账（老路径没坏）
+npm run test:e2e        # 288 项断言：没配支付 ⇒ 购买仍是立即到账（老路径没坏）
 ```
 
-> 两个数字都实测过：**278 = 未配支付**、**280 = 配了支付**。CI 的线上冒烟用同一套自适应逻辑，
+> 两个数字都实测过：**288 = 未配支付**、**290 = 配了支付**（真实域名 `ADMIN_EMAIL` 时是 286，
+> 目标上没有该管理员账号时整段 skip 是 263）。CI 的线上冒烟用同一套自适应逻辑，
 > 所以线上配不配 XorPay 都不会因此变红。
 
 **第 4 步：先部署「没有支付配置」的版本**
@@ -2213,10 +2214,10 @@ npx wrangler secret delete XORPAY_APP_SECRET
 
 - [ ] `npm run typecheck` / `build:client` / `check:routes` / `check:scripts` / `schema:check` 全绿
 - [ ] 本地假网关：下单 → 二维码 → 模拟付款 → 名额到账（≤3 秒）
-- [ ] 本地未配支付：`npm run test:e2e` **278** 项断言全绿（老行为没坏）
-- [ ] 本地配假网关（`XORPAY_AID` / `XORPAY_APP_SECRET` / `XORPAY_API_BASE`）：`npm run test:e2e` **280** 项断言全绿
-      （多「下单要在线支付（202 + 二维码）」与「管理员赠额兜底」两条；2026-10 又新增「删表不退名额 / 续费 / 登录页副标题」7 条，
-      两种模式都已实测全绿）
+- [ ] 本地未配支付：`npm run test:e2e` **288** 项断言全绿（老行为没坏）
+- [ ] 本地配假网关（`XORPAY_AID` / `XORPAY_APP_SECRET` / `XORPAY_API_BASE`）：`npm run test:e2e` **290** 项断言全绿
+      （多「下单要在线支付（202 + 二维码）」与「管理员赠额兜底」两条；2026-10 又新增「删表不退名额 / 续费 / 登录页副标题」7 条、
+      「附件生命周期 / 满容量不许加视图 / 到期状态下发」10 条，两种模式都已实测全绿）
 - [ ] 续费全链路（假网关）：建表 → 清单里点「续费」下单（202 + 二维码，订单带 `databaseId`）
       → `curl.exe -X POST http://127.0.0.1:8788/__pay/<订单号>` → 订单 `paid`、表格 `slotExpiresAt` 往后推一个月、
       `basic.remaining` 与 `purchased` 都不变

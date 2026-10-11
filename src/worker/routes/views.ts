@@ -5,7 +5,7 @@ import type { ViewConfig, ViewDef, ViewType } from '../../shared/types';
 import { defaultViewConfig, mergeViewConfig } from '../../shared/views';
 import { accessForView, assertStructureEditable, assertViewEditable, requireDatabaseAccess } from '../access';
 import { requireUser } from '../auth';
-import { loadDatabaseKind } from '../capacity';
+import { assertDatabaseCanGrow, loadDatabaseKind } from '../capacity';
 import { logChanges } from '../changes';
 import {
   asEnum,
@@ -21,6 +21,7 @@ import {
 } from '../http';
 import { viewFromRow } from '../mappers';
 import { tableDb } from '../shards';
+import { assertSlotActive } from '../slots';
 import type { RequestContext, Route } from '../types';
 import { loadProperties, loadViews, touchDatabase } from './databases';
 
@@ -139,6 +140,10 @@ async function createViewHandler(ctx: RequestContext): Promise<Response> {
       TABLE_LIMIT_EXCEEDED,
     );
   }
+  // 到期未续费（403 slot_expired）/ 容量到上限（403 capacity_exceeded）同样不许再加视图：
+  // 这两条都只拦增长 —— 改名、改筛选、改排序、删视图都不受影响
+  await assertSlotActive(ctx.env, db, ctx.params.id);
+  await assertDatabaseCanGrow(ctx.env, db, ctx.params.id);
 
   const body = await readJson(ctx.request);
 

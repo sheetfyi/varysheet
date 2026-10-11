@@ -10,15 +10,20 @@
  *      剩余不到一周（`SLOT_RENEW_WINDOW_DAYS`）时前端显示「续费」，
  *      续费走同一套下单 / 支付流程，但流水带 `database_id`（不算新增名额），
  *      交付时把 `expires_at` 从 `max(now, 原到期时间)` 往后推。
+ *      **到期没续费只拦增长**：`assertSlotActive()` 把「新增记录 / 新增视图」挡回 403
+ *      `slot_expired`，查看、编辑、删除、分享照常（数据都是用户的，不能因为到期就锁住）。
  *
  * 这里不导入任何 `routes/*`（避免循环依赖）；只依赖用户库、共享口径与分片定位。
  */
-import { addMonths } from '../shared/quota';
+import { SLOT_EXPIRED, addMonths, slotExpired, slotExpiredHint } from '../shared/quota';
 import { asTableKind } from '../shared/tableKind';
 import type { TableKind } from '../shared/types';
-import { newId, sqlNumber, sqlString, type SqlRow } from './http';
+import { forbidden, newId, sqlNumber, sqlString, type SqlRow } from './http';
 import { databaseDb } from './shards';
 import type { Env } from './types';
+
+/** 一次 SQL 里塞多少个表格 id */
+const SLOT_ID_CHUNK = 50;
 
 /** 续费的目标表格（下单前的校验结果） */
 export interface RenewTarget {
@@ -126,20 +131,79 @@ export async function allocateSlot(
 }
 
 /**
- * 一次读全这个账号所有表格的到期时间：`databaseId → expiresAt`（表格列表用它填 `slotExpiresAt`）。
+ * 一次读全这些表格的到期时间：`databaseId → expiresAt`（表格列表用它填 `slotExpiresAt`）。
+ *
+ * 按 id 查（不是按账号）：清单里可能混着「别人分享给我的表」，时长属于表格所有者；
+ * 同一张表只会有一行记录，所以按 id 查到的就是最权威的口径。
  * 迁移（0017）之前建的老表格没有记录，调用方再用 `latestPurchaseExpiry()` 兜底。
  */
-export async function loadSlotAllocations(env: Env, userId: string): Promise<Map<string, number>> {
-  const { results } = await env.DB.prepare(
-    'SELECT database_id, expires_at FROM table_slot_allocations WHERE user_id = ?',
-  )
-    .bind(userId)
-    .all<SqlRow>();
+export async function loadSlotExpiries(env: Env, databaseIds: string[]): Promise<Map<string, number>> {
+  const ids = [...new Set(databaseIds.filter(Boolean))];
   const map = new Map<string, number>();
-  for (const row of results ?? []) {
-    map.set(sqlString(row, 'database_id'), sqlNumber(row, 'expires_at'));
+  for (let index = 0; index < ids.length; index += SLOT_ID_CHUNK) {
+    const chunk = ids.slice(index, index + SLOT_ID_CHUNK);
+    const { results } = await env.DB.prepare(
+      `SELECT database_id, expires_at FROM table_slot_allocations
+        WHERE database_id IN (${chunk.map(() => '?').join(', ')})`,
+    )
+      .bind(...chunk)
+      .all<SqlRow>();
+    for (const row of results ?? []) {
+      map.set(sqlString(row, 'database_id'), sqlNumber(row, 'expires_at'));
+    }
   }
   return map;
+}
+
+/**
+ * 一张表的到期时刻（毫秒）：基础 / 专业表格的时长记在用户库的 `table_slot_allocations`。
+ * 老表格（0017 之前建的，没有那一行）退回「该类型最近一笔购买的到期时间」——
+ * 和表格清单里显示「续费」的口径完全一致；试用表格 / 从没买过 → 0（没有时长，不算到期）。
+ */
+export async function slotExpiryOf(
+  env: Env,
+  databaseId: string,
+  ownerId: string,
+  kind: TableKind | string,
+): Promise<number> {
+  const resolved = asTableKind(kind);
+  if (resolved === 'trial') return 0;
+  const row = await env.DB.prepare('SELECT expires_at FROM table_slot_allocations WHERE database_id = ?')
+    .bind(databaseId)
+    .first<SqlRow>();
+  if (row) return sqlNumber(row, 'expires_at');
+  return latestPurchaseExpiry(env, ownerId, resolved);
+}
+
+/**
+ * 「到期未续费」的增长门禁：新增记录 / 批量新建 / 复制记录 / 新增视图之前调用。
+ *
+ * 到期后**只拦增长** —— 编辑已有记录、删除记录（含删记录时一起清掉的附件）、查询、
+ * 增量同步、分享、导出都照常，不然用户到期后连自己的数据都收拾不了了。
+ * 表格类型与所有者从分片库里读，所以成员 / 分享链接的写入也能算对账（`meta` 已查过就传进来）。
+ */
+export async function assertSlotActive(
+  env: Env,
+  db: D1Database,
+  databaseId: string,
+  meta?: { kind: TableKind; ownerId: string },
+): Promise<void> {
+  let kind = meta?.kind;
+  let ownerId = meta?.ownerId;
+  if (!kind || !ownerId) {
+    const row = await db
+      .prepare('SELECT kind, owner_id FROM databases WHERE id = ?')
+      .bind(databaseId)
+      .first<SqlRow>();
+    // 表格不存在：交给调用方的 404 去报（这里不当成「到期」）
+    if (!row) return;
+    kind = asTableKind(sqlString(row, 'kind', 'basic'));
+    ownerId = sqlString(row, 'owner_id');
+  }
+  if (kind === 'trial') return;
+  const expiresAt = await slotExpiryOf(env, databaseId, ownerId, kind);
+  if (!slotExpired(expiresAt)) return;
+  throw forbidden(slotExpiredHint(kind, expiresAt), SLOT_EXPIRED);
 }
 
 /**

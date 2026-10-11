@@ -40,6 +40,12 @@ export const MAX_PURCHASE_COUNT = 10;
 export const QUOTA_EXCEEDED = 'quota_exceeded';
 
 /**
+ * 表格时长到期（基础 / 专业表格没续费）时的错误码：新增记录 / 新增视图的接口 403 用它，
+ * 前端据此把提示写成「续费后恢复」。到期本身不锁表 —— 查看、编辑、删除、导出、分享都照常。
+ */
+export const SLOT_EXPIRED = 'slot_expired';
+
+/**
  * 「续费」按钮出现的窗口（天）：基础 / 专业表格的剩余时长不多于这么多天时，
  * 表格清单里这张表后面会出现「续费」（见 `src/worker/slots.ts` 的 `table_slot_allocations`）。
  */
@@ -78,6 +84,36 @@ export function slotExpiryText(expiresAt: number, now = Date.now()): string {
   return `有效期至 ${date}（${days > 0 ? `还剩 ${days} 天` : '已过期'}）`;
 }
 
+/** 到期时刻的日期（`2026-11-11`）；没有时长 / 非法值返回空串 */
+export function slotExpiryDate(expiresAt: number): string {
+  if (!Number.isFinite(expiresAt) || expiresAt <= 0) return '';
+  return new Date(expiresAt).toISOString().slice(0, 10);
+}
+
+/**
+ * 这张表**已经到期且还没续费**：有时长记录（`expiresAt > 0`）且到期时刻已经过去。
+ * 没有时长记录（`expiresAt = 0`：试用表格、从没买过、老表兜底也查不到）恒为 false ——
+ * 「没时长」不等于「到期」，不能把这种表当成过期锁住。
+ *
+ * 到期后**只拦增长**：不能再添加记录 / 视图，编辑、删除、查询、导出统统照常
+ * （见 `src/worker/slots.ts` 的 `assertSlotActive()`）。
+ */
+export function slotExpired(expiresAt: number, now = Date.now()): boolean {
+  if (!Number.isFinite(expiresAt) || expiresAt <= 0) return false;
+  return expiresAt <= now;
+}
+
+/**
+ * 到期后的提示句：表格页顶部的提示条、新增记录 / 新增视图前的拦截、服务端的 403 都用它。
+ * 只说「什么不能做 + 怎么恢复」，不吓唬人（数据都在）。
+ */
+export function slotExpiredHint(kind: TableKind | string | null | undefined, expiresAt: number): string {
+  const date = slotExpiryDate(expiresAt);
+  const label = tableKindLabel(kind);
+  const day = date ? `已于 ${date} 到期` : '已到期';
+  return `${label}${day}（未续费）：仍可查看、编辑、删除与分享数据，但不能再添加记录或视图，续费后立即恢复`;
+}
+
 /**
  * 名额规则：侧边栏的说明弹窗原样展示，改口径时只改这里。
  *
@@ -92,6 +128,7 @@ export const TABLE_QUOTA_RULES: string[] = [
   '基础表格与专业表格：删掉表格会把那个名额一起带走（名额不退还，已付的钱也不退）。',
   `购买时长 = 单位（月 1 个月 / 年 12 个月）× 数量（月 1 ~ 12，年 1 ~ 5），总时长 ${MIN_PURCHASE_MONTHS} ~ ${MAX_PURCHASE_MONTHS} 个月；金额 = 月单价 × 表格数量 × 总月数。`,
   `基础表格与专业表格自带时长（从建表时的购买时长起算）：剩余不到 ${SLOT_RENEW_WINDOW_DAYS} 天时表格清单里会出现「续费」，续费和购买同价、同样走扫码支付。`,
+  '基础表格与专业表格到期没续费时数据都还在（查看、编辑、删除、分享照常），但不能添加新记录、也不能加新视图；续费后立即恢复。',
 ];
 
 function countOf(value: number | undefined): number {

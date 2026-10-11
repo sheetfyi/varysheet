@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { FIELD_META, cellLockHint, cellLockKey, isEmptyValue, sameCellValue } from '../../shared/fields';
 import { capacityBlockedHint, capacityTooltip } from '../../shared/capacity';
+import { slotExpiredHint } from '../../shared/quota';
 import type { CellValue, DatabaseChanges, Property, PublicDatabaseResponse, RowRecord } from '../../shared/types';
 import { ApiError, publicApi } from '../api';
 import { useCellEditLocks } from '../lib/cellEditLocks';
@@ -210,6 +211,14 @@ export function PublicPage({ token }: PublicPageProps) {
 
   const createRow = useCallback(async () => {
     if (!canEdit) return;
+    // 到期未续费（基础 / 专业表格）：这张表只能查看和编辑，不能再新增记录
+    const expiredHintNow = payload?.database.slotExpired
+      ? slotExpiredHint(payload.database.capacity?.kind, payload.database.slotExpiresAt)
+      : '';
+    if (expiredHintNow) {
+      setError(expiredHintNow);
+      return;
+    }
     // 容量到上限后只拦增长：本地先给一句人话，服务端也会用 403 capacity_exceeded 挡下
     const hint = payload?.database.capacity ? capacityBlockedHint(payload.database.capacity) : '';
     if (hint) {
@@ -263,10 +272,13 @@ export function PublicPage({ token }: PublicPageProps) {
     );
   }
 
-  // 容量到上限（记录数或附件）：这张表只能查看和查询了
+  // 容量到上限（记录数或附件）/ 到期未续费：这张表只剩「查看和编辑」了
   const capacity = payload.database.capacity;
   const capacityHint = capacity ? capacityBlockedHint(capacity) : '';
   const capacityTip = capacity ? capacityTooltip(capacity) : '';
+  const expiredHint = payload.database.slotExpired
+    ? slotExpiredHint(capacity?.kind, payload.database.slotExpiresAt)
+    : '';
 
   return (
     <div className="public-page">
@@ -285,6 +297,11 @@ export function PublicPage({ token }: PublicPageProps) {
         <p className="muted small share-desc">该链接已开启「限制编辑」：输入不限次数，但每次保存后 10 秒内还能继续修改，之后该格子只能查看（把内容清空则视为没有输入，不受限制）。</p>
       ) : null}
       {error ? <p className="error small share-desc">{error}</p> : null}
+      {expiredHint ? (
+        <p className="capacity-notice" role="status">
+          ⏳ {expiredHint}
+        </p>
+      ) : null}
       {capacityHint ? (
         <p className="capacity-notice" role="status" title={capacityTip}>
           ⛔ {capacityHint}
@@ -313,8 +330,8 @@ export function PublicPage({ token }: PublicPageProps) {
               type="button"
               className="btn primary small"
               onClick={() => void createRow()}
-              disabled={Boolean(capacity?.atCapacity)}
-              title={capacityHint || undefined}
+              disabled={Boolean(capacity?.atCapacity || expiredHint)}
+              title={expiredHint || capacityHint || undefined}
             >
               ＋ 新建记录
             </button>

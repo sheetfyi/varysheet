@@ -3,6 +3,7 @@ import { FIELD_META, normalizeCellValue } from '../../shared/fields';
 import { TABLE_LIMIT_EXCEEDED, tableKindMeta } from '../../shared/tableKind';
 import type { FieldType, PropertyConfig, RowValues, SelectOption } from '../../shared/types';
 import { accessForProperty, assertStructureEditable, requireDatabaseAccess } from '../access';
+import { deleteAttachments } from '../attachments';
 import { requireUser } from '../auth';
 import { loadDatabaseKind } from '../capacity';
 import { logChanges } from '../changes';
@@ -293,6 +294,10 @@ async function deletePropertyHandler(ctx: RequestContext): Promise<Response> {
 
   const properties = await loadProperties(db, access.databaseId);
   if (properties.length <= 1) throw badRequest('至少需要保留一个字段');
+
+  // 「文件与媒体」列里的附件跟着这一列一起删（R2 对象 + files 行）：下面马上会把记录值里的
+  // 引用清掉，清完就再没有任何地方引用这些文件了（不删的话它们会永远留在 R2 里占容量）
+  await deleteAttachments(ctx.env, db, { databaseId: access.databaseId, propertyId: ctx.params.id });
 
   await db.prepare('DELETE FROM properties WHERE id = ?').bind(ctx.params.id).run();
 

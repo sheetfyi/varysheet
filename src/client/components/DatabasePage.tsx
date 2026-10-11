@@ -23,6 +23,7 @@ import type {
 import { defaultViewConfig } from '../../shared/views';
 import { conditionConjunction, groupFilterConditions, type Conjunction } from '../../shared/viewFilter';
 import { capacityBlockedHint, capacityTooltip } from '../../shared/capacity';
+import { slotExpiredHint } from '../../shared/quota';
 import { tableKindCapacityText, tableKindMeta } from '../../shared/tableKind';
 import { ApiError, api } from '../api';
 import { useCellEditLocks } from '../lib/cellEditLocks';
@@ -163,9 +164,18 @@ export function DatabasePage({
   /**
    * 列数 / 视图数到上限：把「＋」置灰并给一句人话（服务端同样会 403 `limit_exceeded`
    * 兜底）。只拦新增 —— 已超限的老表仍然能删字段 / 删视图把自己收拾回上限以内。
+   *
+   * 「＋ 新建视图」的三道闸（与服务端一一对应）：视图数上限、容量到上限、表格到期未续费。
    */
-  const canAddView = views.length < kindMeta.maxViews;
-  const addViewHint = `${kindMeta.label}最多 ${kindMeta.maxViews} 个视图（当前 ${views.length} 个）：删掉一些视图后再添加，或换成专业表格`;
+  const expiredHint = detail.slotExpired ? slotExpiredHint(detail.kind, detail.slotExpiresAt) : '';
+  const viewLimitHint = `${kindMeta.label}最多 ${kindMeta.maxViews} 个视图（当前 ${views.length} 个）：删掉一些视图后再添加，或换成专业表格`;
+  const canAddView =
+    views.length < kindMeta.maxViews && !detail.slotExpired && !detail.capacity?.atCapacity;
+  const addViewHint = detail.slotExpired
+    ? expiredHint
+    : detail.capacity?.atCapacity
+      ? capacityBlockedHint(detail.capacity)
+      : viewLimitHint;
 
   /**
    * 容量到上限后**只拦增长**：新建记录 / 复制记录 / 上传附件之前先在本地挡一下
@@ -176,6 +186,16 @@ export function DatabasePage({
     const hint = detail.capacity ? capacityBlockedHint(detail.capacity) : '';
     if (!hint) return false;
     onToast(hint, 'error');
+    return true;
+  };
+
+  /**
+   * 表格到期未续费同样**只拦增长**：不能再新建 / 复制记录（服务端 403 `slot_expired` 兜底）。
+   * 查看、编辑、删除、分享、导出照常 —— 数据都是用户自己的，不能因为到期就锁住。
+   */
+  const blockedByExpiry = (): boolean => {
+    if (!expiredHint) return false;
+    onToast(expiredHint, 'error');
     return true;
   };
 
@@ -581,6 +601,7 @@ export function DatabasePage({
 
   const createRow = async (preset?: Record<string, CellValue>) => {
     if (!canEdit) return;
+    if (blockedByExpiry()) return;
     if (blockedByCapacity()) return;
     const release = beginWrite();
     try {
@@ -650,6 +671,7 @@ export function DatabasePage({
 
   const duplicateRows = async (targets: RowRecord[]) => {
     if (!canEdit || !targets.length) return;
+    if (blockedByExpiry()) return;
     if (blockedByCapacity()) return;
     const release = beginWrite();
     try {
@@ -999,6 +1021,13 @@ export function DatabasePage({
             </button>
           ) : null}
         </header>
+      ) : null}
+
+      {/* 到期未续费：只拦增长 —— 表格照常打开、查询、编辑、删除，只是不能再加记录 / 视图 */}
+      {expiredHint ? (
+        <p className="capacity-notice" role="status">
+          ⏳ {expiredHint}
+        </p>
       ) : null}
 
       {/* 容量到上限：只拦增长 —— 表格照常打开、照常查询，新增 / 复制 / 上传都停用 */}

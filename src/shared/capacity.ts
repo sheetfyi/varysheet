@@ -124,7 +124,7 @@ export function capacityTooltip(capacity: DatabaseCapacity): string {
     return `${usage}\n${tableKindMeta(capacity.kind).label}：记录、附件与存储时间都不限制`;
   }
   if (!capacity.atCapacity) {
-    return `${usage}\n已用 ${capacityPercent(capacity)}%：到上限后只能查看和查询，新增记录 / 上传附件会停用`;
+    return `${usage}\n已用 ${capacityPercent(capacity)}%：到上限后只能查看和查询，新增记录 / 上传附件 / 新建视图会停用`;
   }
   return `${usage}\n${capacityBlockedHint(capacity)}`;
 }
@@ -152,5 +152,5 @@ export function capacityBlockedHint(capacity: DatabaseCapacity): string {
   if (capacity.storageFull) {
     full.push(`附件 ${formatBytes(capacity.storageBytes)}/${formatBytes(capacity.maxStorageBytes)}`);
   }
-  return `${tableKindMeta(capacity.kind).label}已达容量上限（${full.join(' · ')}）：只能查看和查询，新增记录、复制记录与上传附件都已停用，删除一些数据后自动恢复`;
+  return `${tableKindMeta(capacity.kind).label}已达容量上限（${full.join(' · ')}）：只能查看和查询，新增记录、复制记录、上传附件与新建视图都已停用，删除一些数据后自动恢复`;
 }

@@ -16,6 +16,7 @@ import {
 import {
   MAX_PURCHASE_COUNT,
   quotaSetFromUsed,
+  slotExpiredHint,
   slotExpiryText,
   slotRenewable,
   TABLE_QUOTA_RULES,
@@ -913,6 +914,12 @@ export function Sidebar({
               <span className="label">{database.name}</span>
               {/* 类型徽标兼容量入口：点它弹出「记录 / 附件」明细（原来的硬盘图标已按需求去掉） */}
               <KindCapacityTag name={database.name} kind={database.kind} capacity={database.capacity} />
+              {/* 到期未续费：清单里标一下（红色小标签），避免用户打开表格才发现加不了记录 */}
+              {database.slotExpired ? (
+                <span className="kind-tag expired-tag" title={slotExpiredHint(database.kind, database.slotExpiresAt ?? 0)}>
+                  已到期
+                </span>
+              ) : null}
               {/* 时长进入最后一周（≤ 7 天）的续费入口：价格与支付规则和购买完全相同 */}
               {canRenewSlot(database) ? (
                 <span

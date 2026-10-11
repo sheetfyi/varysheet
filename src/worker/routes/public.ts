@@ -1,4 +1,6 @@
 /** /api/public/:token* - read (and optionally write) access through a share link. */
+import { slotExpired } from '../../shared/quota';
+import { asTableKind } from '../../shared/tableKind';
 import type { PublicDatabaseResponse } from '../../shared/types';
 import { resolveShareToken, type ShareAccess } from '../access';
 import {
@@ -10,6 +12,7 @@ import {
 } from '../cellEdits';
 import { headRev, loadChanges, logChanges } from '../changes';
 import { assertDatabaseCanGrow, loadDatabaseCapacity } from '../capacity';
+import { deleteAttachments, removedAttachmentIds } from '../attachments';
 import {
   asNumberValue,
   badRequest,
@@ -25,6 +28,7 @@ import {
 import { recordFromRow } from '../mappers';
 import { loadUserContacts } from '../notes';
 import { withDefaultStatus } from '../statusDefaults';
+import { assertSlotActive, slotExpiryOf } from '../slots';
 import type { Env, RequestContext, Route } from '../types';
 import { countRecords, loadPeopleNames, loadProperties, loadRecords, loadViews, ownerLabel, touchDatabase } from './databases';
 import { normalizeValues } from './records';
@@ -45,7 +49,7 @@ async function publicDatabaseHandler(ctx: RequestContext): Promise<Response> {
 
   const row = await share.db
     .prepare(
-      'SELECT d.id, d.name, d.icon, d.description, d.owner_id FROM databases d WHERE d.id = ? AND d.is_archived = 0',
+      'SELECT d.id, d.name, d.icon, d.description, d.owner_id, d.kind FROM databases d WHERE d.id = ? AND d.is_archived = 0',
     )
     .bind(share.databaseId)
     .first<SqlRow>();
@@ -64,6 +68,9 @@ async function publicDatabaseHandler(ctx: RequestContext): Promise<Response> {
     // 单表容量用量：公开链接页到上限后也只剩「查看和查询」
     loadDatabaseCapacity(ctx.env, share.db, share.databaseId),
   ]);
+  // 到期未续费（基础 / 专业表格）：公开链接页同样只拦增长（不能再新增记录，编辑 / 删除照常）
+  const kind = asTableKind(sqlString(row, 'kind', 'basic'));
+  const slotExpiresAt = await slotExpiryOf(ctx.env, share.databaseId, sqlString(row, 'owner_id'), kind);
   // 公开链接也要能显示「创建人 / 最后编辑人」的姓名（表格所有者 + 协作者）
   const people = await loadPeopleNames(ctx.env, rows);
   // 通过该分享链接改过的格子：只读的 + 还在 10 秒计时窗口内的（勾了「限制编辑」才有）
@@ -86,6 +93,8 @@ async function publicDatabaseHandler(ctx: RequestContext): Promise<Response> {
       ownerId: sqlString(row, 'owner_id'),
       ownerName: ownerLabel(owners.get(sqlString(row, 'owner_id'))),
       capacity,
+      slotExpiresAt,
+      slotExpired: slotExpired(slotExpiresAt),
     },
     properties,
     views,
@@ -106,7 +115,8 @@ async function publicCreateRecordHandler(ctx: RequestContext): Promise<Response>
   const body = await readJson(ctx.request);
   const properties = await loadProperties(db, share.databaseId);
   if (!properties.length) throw badRequest('该表格还没有字段');
-  // 容量满了只拦增长：公开链接页也不能再新增记录（改 / 删已有记录照常）
+  // 容量满了 / 到期未续费都只拦增长：公开链接页也不能再新增记录（改 / 删已有记录照常）
+  await assertSlotActive(ctx.env, db, share.databaseId);
   await assertDatabaseCanGrow(ctx.env, db, share.databaseId, { rows: 1 });
 
   const values = await withDefaultStatus(
@@ -178,6 +188,11 @@ async function publicUpdateRecordHandler(ctx: RequestContext): Promise<Response>
     .run();
   // 写入成功之后才记账：值非空开始 / 刷新 10 秒计时，值被清空则删掉记账（= 没输入过）
   await applyCellEdits(db, share.databaseId, editorKey, ctx.params.recordId, changed, values);
+  // 从「文件与媒体」列里被去掉的附件一起删掉（R2 对象 + files 行），不然 R2 占用只涨不跌
+  const removedFiles = removedAttachmentIds(properties, current.values, values);
+  if (removedFiles.length) {
+    await deleteAttachments(ctx.env, db, { databaseId: share.databaseId, fileIds: removedFiles });
+  }
   await touchDatabase(db, share.databaseId);
   // 通过分享链接改的格子：表格里的协作者几秒内就能看到
   await logChanges(db, share.databaseId, 'row', [ctx.params.recordId]);
@@ -194,10 +209,15 @@ async function publicUpdateRecordHandler(ctx: RequestContext): Promise<Response>
 async function publicDeleteRecordHandler(ctx: RequestContext): Promise<Response> {
   const share = await requireShare(ctx.env, ctx.params.token, true);
   const db = share.db;
-  const result = await db.prepare('DELETE FROM records WHERE id = ? AND database_id = ?')
+  // 记录没了，它上面的附件也一起从 R2 删掉（分享链接删的记录同样不例外）
+  const result = await db.prepare('SELECT id FROM records WHERE id = ? AND database_id = ?')
+    .bind(ctx.params.recordId, share.databaseId)
+    .first<SqlRow>();
+  if (!result) throw notFound('记录不存在');
+  await deleteAttachments(ctx.env, db, { databaseId: share.databaseId, recordIds: [ctx.params.recordId] });
+  await db.prepare('DELETE FROM records WHERE id = ? AND database_id = ?')
     .bind(ctx.params.recordId, share.databaseId)
     .run();
-  if (!result.meta.changes) throw notFound('记录不存在');
   await touchDatabase(db, share.databaseId);
   await logChanges(db, share.databaseId, 'delete', [ctx.params.recordId]);
   return json({ ok: true });

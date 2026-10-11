@@ -70,6 +70,20 @@ SQLite 的外键不能跨库，拆分之后：
 「没有归属」的旧附件（`files.database_id IS NULL`，拆分前的遗留）在数据搬迁脚本里会
 被跳过并提示，需要人工处理。
 
+**R2 对象只在 `files` 行的 `r2_key` 里出现**，所以任何删 `files` 行的地方都必须先把对象删掉，
+否则那个对象永远找不回来、R2 占用只涨不跌。统一走 `src/worker/attachments.ts`：
+
+| 场景 | 入口 |
+| --- | --- |
+| 删记录（单条 / 批量 / 公开链接） | `routes/records.ts`、`routes/public.ts` |
+| 编辑时把附件从格子里去掉 | 同上两个文件（只删「这次真的少掉的」附件 id） |
+| 删掉「文件与媒体」列 | `routes/properties.ts` |
+| 保留期清理过期的记录与附件 | `retention.ts`（清理时容忍 R2 失败，下一轮再删） |
+| 删整张表格 / 注销账号 | `routes/databases.ts`、`admin.ts`（按 `database_id` / `owner_id` 一次清完） |
+
+顺序是「先删 R2 对象、再删 `files` 行」；同一个 `r2_key` 被多行引用时（复制记录会克隆出
+一份自己的 `files` 行）按引用计数处理，还有别的行指着就保留对象。
+
 ## 拆分已有数据（老部署升级）
 
 ```bash

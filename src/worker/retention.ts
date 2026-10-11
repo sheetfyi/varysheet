@@ -13,11 +13,13 @@
  *   2. 运维手动：`POST /api/admin/maintenance/retention`（管理员），返回按类型拆开的清理数量。
  *
  * 判定口径是**创建时间**（`records.created_at` / `files.created_at`）：记录只要还在
- * 保留期内就留着，不会因为「被改过」而续期。删记录时 notes / cell_edits 由外键级联
- * 清掉；附件的 R2 对象必须先删（`files` 行删了就再也拿不到 key）。
+ * 保留期内就留着，不会因为「被改过」而续期。清一条记录的顺序是「先删附件、再删记录」：
+ * 先把它的 `files` 行指向的 R2 对象删掉（行删了就再也拿不到 key，见 `worker/attachments.ts`），
+ * 再删记录本身（notes / cell_edits 由外键级联清掉）。
  */
+import { deleteAttachments } from './attachments';
 import { logChanges } from './changes';
-import { sqlNumber, sqlString, type SqlRow } from './http';
+import { sqlString, type SqlRow } from './http';
 import { forEachShardSafe } from './shards';
 import { DAY_MS, tableKindMeta } from '../shared/tableKind';
 import type { TableKind } from '../shared/types';
@@ -30,9 +32,6 @@ export const DEFAULT_TRIAL_RETENTION_DAYS = tableKindMeta('trial').retentionDays
 
 /** 参与自动清理的类型（专业表格永久保留，永远不清理） */
 const PURGE_KINDS: readonly TableKind[] = ['trial', 'basic'];
-
-/** 一次删给 R2 的 key 数量上限（多于此就分批） */
-const R2_DELETE_BATCH = 500;
 
 /**
  * 某一类表格的保留天数：试用看 `TRIAL_TABLE_RETENTION_DAYS`（默认 180）、基础看
@@ -137,6 +136,11 @@ export async function purgeExpiredTableData(
  * 清一张试用 / 基础表格里的过期数据；真的清掉了东西才返回 true
  * （顺便往增量日志里记一条 `schema`，别人开着的表格页会整表重载）。
  *
+ * 顺序：先删附件（R2 对象 + files 行）、再删记录 —— 记录删掉后它的附件就再也
+ * 没人引用了，反过来（先删记录）就会留下一堆查不到 key 的 files 行，R2 占用只涨不跌。
+ * R2 暂时删不动时也不卡住清理（见 `deleteAttachments` 的 `tolerateR2Failure`），
+ * 那种对象留到下一轮再删。
+ *
  * `db` 是这张表所在的分片：记录 / 附件 / 改动日志都在里面。
  */
 async function purgeDatabase(
@@ -146,27 +150,31 @@ async function purgeDatabase(
   cutoff: number,
   result: RetentionKindResult,
 ): Promise<boolean> {
-  const { results: fileRows } = await db
-    .prepare('SELECT id, r2_key, size FROM files WHERE database_id = ? AND created_at < ?')
+  // 1) 过期的记录先列出来：记录一走，挂在它上面的附件（哪怕是保留期内新传的）也一起走
+  const { results: recordRows } = await db
+    .prepare('SELECT id FROM records WHERE database_id = ? AND created_at < ?')
     .bind(databaseId, cutoff)
     .all<SqlRow>();
-  const files = fileRows ?? [];
-
-  if (files.length) {
-    // R2 里的对象先删：files 行删掉之后就找不到 key 了
-    for (let index = 0; index < files.length; index += R2_DELETE_BATCH) {
-      const keys = files.slice(index, index + R2_DELETE_BATCH).map((file) => sqlString(file, 'r2_key'));
-      await env.BUCKET.delete(keys).catch(() => undefined);
-    }
-    await db
-      .prepare('DELETE FROM files WHERE database_id = ? AND created_at < ?')
-      .bind(databaseId, cutoff)
-      .run();
-    result.files += files.length;
-    result.bytes += files.reduce((sum, file) => sum + sqlNumber(file, 'size'), 0);
+  const recordIds = (recordRows ?? []).map((row) => sqlString(row, 'id'));
+  if (recordIds.length) {
+    const removed = await deleteAttachments(env, db, { databaseId, recordIds, tolerateR2Failure: true });
+    result.files += removed.files;
+    result.bytes += removed.bytes;
   }
 
-  // 记录删掉后，它上面的备注 / 格子编辑记录由外键级联清理
+  // 2) 保留期到点的附件：含历史上遗留的孤儿行（记录早被删掉、行还躺在 files 里）
+  const { results: fileRows } = await db
+    .prepare('SELECT id FROM files WHERE database_id = ? AND created_at < ?')
+    .bind(databaseId, cutoff)
+    .all<SqlRow>();
+  const fileIds = (fileRows ?? []).map((row) => sqlString(row, 'id'));
+  if (fileIds.length) {
+    const removed = await deleteAttachments(env, db, { databaseId, fileIds, tolerateR2Failure: true });
+    result.files += removed.files;
+    result.bytes += removed.bytes;
+  }
+
+  // 3) 记录删掉后，它上面的备注 / 格子编辑记录由外键级联清理
   const deleted = await db
     .prepare('DELETE FROM records WHERE database_id = ? AND created_at < ?')
     .bind(databaseId, cutoff)
@@ -174,7 +182,7 @@ async function purgeDatabase(
   const records = Number(deleted.meta?.changes ?? 0);
   result.records += records;
 
-  if (files.length || records > 0) {
+  if (recordIds.length || fileIds.length || records > 0) {
     await logChanges(db, databaseId, 'schema');
     return true;
   }

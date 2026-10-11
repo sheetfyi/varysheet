@@ -17,6 +17,7 @@ import {
   json,
   newId,
   notFound,
+  parseJsonObject,
   positionBetween,
   readJson,
   sqlNumber,
@@ -25,8 +26,10 @@ import {
 } from '../http';
 import { recordFromRow } from '../mappers';
 import { assertDatabaseCanGrow } from '../capacity';
+import { deleteAttachments, cloneRecordAttachments, removedAttachmentIds } from '../attachments';
 import { loadNotes } from '../notes';
 import { tableDb } from '../shards';
+import { assertSlotActive } from '../slots';
 import { withDefaultStatus } from '../statusDefaults';
 import type { RequestContext, Route } from '../types';
 import { countRecords, loadProperties, loadRecord, loadRecords, touchDatabase } from './databases';
@@ -96,6 +99,8 @@ async function createRecordHandler(ctx: RequestContext): Promise<Response> {
   const user = await requireUser(ctx.request, ctx.env);
   await requireDatabaseAccess(ctx, ctx.params.id, user, 'edit');
   const db = tableDb(ctx);
+  // 到期未续费只拦增长：新建记录会被 403 slot_expired 挡回去（编辑 / 删除照常）
+  await assertSlotActive(ctx.env, db, ctx.params.id);
   // 容量满了只拦增长：新建记录会被 403 capacity_exceeded 挡回去（编辑 / 删除照常）
   await assertDatabaseCanGrow(ctx.env, db, ctx.params.id, { rows: 1 });
   const body = await readJson(ctx.request);
@@ -157,6 +162,8 @@ async function bulkCreateHandler(ctx: RequestContext): Promise<Response> {
       : [];
   if (!list.length) throw badRequest('请至少提交一行数据');
   if (list.length > MAX_BULK) throw badRequest(`单次最多创建 ${MAX_BULK} 行`);
+  // 到期未续费 / 容量满了都只拦增长：整批要么进得去、要么整批拒绝
+  await assertSlotActive(ctx.env, db, ctx.params.id);
   // 批量新建按行数预检：整批要么进得去、要么整批拒绝（别写一半）
   await assertDatabaseCanGrow(ctx.env, db, ctx.params.id, { rows: list.length });
 
@@ -244,6 +251,12 @@ async function updateRecordHandler(ctx: RequestContext): Promise<Response> {
     .run();
   // 写入成功之后才记账：值非空开始 / 刷新 10 秒计时，值被清空则删掉记账（= 没输入过）
   await applyCellEdits(db, access.databaseId, editorKey, ctx.params.id, changed, values);
+  // 从「文件与媒体」列里被去掉的附件要真的删掉（R2 对象 + files 行）：不删的话
+  // 用户每次换一个附件都会在 R2 里留一份没人引用的垃圾，占用只涨不跌
+  const removedFiles = removedAttachmentIds(properties, current.values, values);
+  if (removedFiles.length) {
+    await deleteAttachments(ctx.env, db, { databaseId: access.databaseId, fileIds: removedFiles });
+  }
   await touchDatabase(db, access.databaseId);
   // 顺序很重要：数据先落库、日志后写（见 worker/changes.ts 的文件头）
   await logChanges(db, access.databaseId, 'row', [ctx.params.id]);
@@ -261,6 +274,9 @@ async function deleteRecordHandler(ctx: RequestContext): Promise<Response> {
   const user = await requireUser(ctx.request, ctx.env);
   const access = await accessForRecord(ctx, ctx.params.id, user, 'edit');
   const db = tableDb(ctx);
+  // 记录没了，它上面的附件也要一起从 R2 删掉（先删对象再删行，见 worker/attachments.ts）：
+  // 不然 R2 里会一直堆着没人引用的文件，占用只涨不跌
+  await deleteAttachments(ctx.env, db, { databaseId: access.databaseId, recordIds: [ctx.params.id] });
   await db.prepare('DELETE FROM records WHERE id = ?').bind(ctx.params.id).run();
   await touchDatabase(db, access.databaseId);
   await logChanges(db, access.databaseId, 'delete', [ctx.params.id]);
@@ -275,9 +291,12 @@ async function duplicateRecordsHandler(ctx: RequestContext): Promise<Response> {
   const recordIds = Array.isArray(body.recordIds) ? body.recordIds.map(String) : [];
   if (!recordIds.length) throw badRequest('请选择要复制的记录');
   if (recordIds.length > MAX_BULK) throw badRequest(`单次最多复制 ${MAX_BULK} 行`);
+  // 复制也是增长：到期未续费 / 容量满了都不许复制
+  await assertSlotActive(ctx.env, db, ctx.params.id);
   // 复制也是增长（已归档 / 不存在的 id 会被跳过，这里按请求条数保守预检）
   await assertDatabaseCanGrow(ctx.env, db, ctx.params.id, { rows: recordIds.length });
 
+  const properties = await loadProperties(db, ctx.params.id);
   const now = Date.now();
   const created: RowRecord[] = [];
   for (const recordId of recordIds) {
@@ -288,12 +307,20 @@ async function duplicateRecordsHandler(ctx: RequestContext): Promise<Response> {
     if (!source) continue;
     const position = await positionAfter(db, ctx.params.id, sqlString(source, 'id'));
     const id = newId();
+    // 附件跟着复制一份（新的 files 行）：两条记录各自独立，删哪条都不影响另一条
+    const values = await cloneRecordAttachments(db, {
+      databaseId: ctx.params.id,
+      recordId: id,
+      values: parseJsonObject<RowValues>(sqlString(source, 'values', '{}'), {}),
+      properties,
+      uploadedBy: user.id,
+    });
     await db
       .prepare(
         `INSERT INTO records (id, database_id, "values", position, created_by, updated_by, is_archived, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`,
       )
-      .bind(id, ctx.params.id, sqlString(source, 'values', '{}'), position, user.id, user.id, now, now)
+      .bind(id, ctx.params.id, JSON.stringify(values), position, user.id, user.id, now, now)
       .run();
     const record = await loadRecord(db, id);
     if (record) created.push(record);
@@ -315,6 +342,9 @@ async function bulkDeleteHandler(ctx: RequestContext): Promise<Response> {
   const recordIds = Array.isArray(body.recordIds) ? body.recordIds.map(String) : [];
   if (!recordIds.length) throw badRequest('请选择要删除的记录');
   if (recordIds.length > MAX_BULK) throw badRequest(`单次最多删除 ${MAX_BULK} 行`);
+
+  // 这些记录上的附件跟着一起删（R2 对象 + files 行）：删记录不删附件 = R2 占用只涨不跌
+  await deleteAttachments(ctx.env, db, { databaseId: ctx.params.id, recordIds });
 
   const placeholders = recordIds.map(() => '?').join(', ');
   await db.prepare(`DELETE FROM records WHERE database_id = ? AND id IN (${placeholders})`)

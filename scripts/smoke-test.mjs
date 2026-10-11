@@ -2006,6 +2006,90 @@ async function main() {
     check('download file', download.ok && text === 'varysheet smoke test', `status=${download.status}`);
   }
 
+  // ------------------------------------------------- 附件生命周期（删记录必须清 R2）
+  // 附件上传后是「R2 对象 + files 行」两份：记录被删掉、或附件从格子里被换掉时两份都要清，
+  // 不然 R2 占用只涨不跌。这里拿容量里的「附件占用」当尺子：上传后上升、删除后回到基线，
+  // 同时那个文件的下载接口应当变成 404。
+  section('attachment cleanup (删记录 / 换附件都要清 R2)');
+  const filesField = await call(`/api/databases/${databaseId}/properties`, {
+    method: 'POST',
+    body: { name: '附件', type: 'files' },
+  });
+  const filesProperty = (filesField.data?.properties ?? []).find((property) => property.type === 'files');
+  const storageBaseline = (await call(`/api/databases/${databaseId}`)).data?.capacity?.storageBytes ?? 0;
+  check(
+    'add a files field for the attachment checks',
+    filesField.status === 201 && Boolean(filesProperty?.id) && storageBaseline > 0,
+    `status=${filesField.status} baseline=${storageBaseline}`,
+  );
+
+  /** 往某条记录的「附件」格子里传一个文件（files 行会带上 record_id / property_id） */
+  const uploadFor = async (recordId, label) => {
+    const form = new FormData();
+    form.set('file', new Blob([`varysheet ${label}`], { type: 'text/plain' }), `${label}.txt`);
+    form.set('databaseId', databaseId);
+    form.set('recordId', recordId);
+    form.set('propertyId', filesProperty.id);
+    return call('/api/files', { method: 'POST', form });
+  };
+  const storageNow = async () => (await call(`/api/databases/${databaseId}`)).data?.capacity?.storageBytes ?? -1;
+
+  if (filesProperty?.id) {
+    // 1) 删记录：它的附件（R2 对象 + files 行）一起走
+    const attachedRow = await call(`/api/databases/${databaseId}/records`, {
+      method: 'POST',
+      body: { values: { [titleProperty.id]: '附件行（删记录）' } },
+    });
+    const attachedId = attachedRow.data?.record?.id;
+    const uploadOne = attachedId ? await uploadFor(attachedId, 'attach-one') : { status: 0 };
+    const fileOne = uploadOne.data?.file;
+    const linked = fileOne
+      ? await call(`/api/records/${attachedId}`, { method: 'PATCH', body: { values: { [filesProperty.id]: [fileOne] } } })
+      : { status: 0 };
+    const storageWithFile = await storageNow();
+    check(
+      'an uploaded attachment counts toward the table storage',
+      uploadOne.status === 201 && linked.status === 200 && Boolean(fileOne?.id) && storageWithFile > storageBaseline,
+      `upload=${uploadOne.status} patch=${linked.status} storage=${storageBaseline}->${storageWithFile}`,
+    );
+
+    const removedRow = attachedId ? await call(`/api/records/${attachedId}`, { method: 'DELETE' }) : { status: 0 };
+    const afterRowDelete = await storageNow();
+    const goneOne = fileOne ? await call(`/api/files/${fileOne.id}`) : { status: 0 };
+    check(
+      'deleting a record deletes its attachment (storage back to baseline, download 404)',
+      removedRow.data?.ok === true && afterRowDelete === storageBaseline && goneOne.status === 404,
+      `delete=${removedRow.status} storage=${storageWithFile}->${afterRowDelete} baseline=${storageBaseline} file=${goneOne.status}`,
+    );
+
+    // 2) 编辑时把附件从格子里去掉：同样删掉（换成别的附件时不留旧文件）
+    const replacedRow = await call(`/api/databases/${databaseId}/records`, {
+      method: 'POST',
+      body: { values: { [titleProperty.id]: '附件行（清空）' } },
+    });
+    const replacedId = replacedRow.data?.record?.id;
+    const uploadTwo = replacedId ? await uploadFor(replacedId, 'attach-two') : { status: 0 };
+    const fileTwo = uploadTwo.data?.file;
+    if (replacedId && fileTwo) {
+      await call(`/api/records/${replacedId}`, { method: 'PATCH', body: { values: { [filesProperty.id]: [fileTwo] } } });
+    }
+    const cleared = replacedId
+      ? await call(`/api/records/${replacedId}`, { method: 'PATCH', body: { values: { [filesProperty.id]: null } } })
+      : { status: 0 };
+    const afterClear = await storageNow();
+    const goneTwo = fileTwo ? await call(`/api/files/${fileTwo.id}`) : { status: 0 };
+    check(
+      'removing an attachment from a cell deletes it from R2 too',
+      cleared.status === 200 && afterClear === storageBaseline && goneTwo.status === 404,
+      `status=${cleared.status} storage=${afterClear} baseline=${storageBaseline} file=${goneTwo.status}`,
+    );
+    if (replacedId) await call(`/api/records/${replacedId}`, { method: 'DELETE' });
+
+    // 3) 删掉「文件与媒体」这一列：列里的附件也一起清
+    const droppedField = await call(`/api/properties/${filesProperty.id}`, { method: 'DELETE' });
+    check('delete the files field', droppedField.status === 200, `status=${droppedField.status}`);
+  }
+
   // ---------------------------------------------------------------- capacity
   // 单表容量：记录数（默认 500）/ 附件占用（默认 1GB）到上限后**只拦增长** ——
   // 新建记录、批量新建、复制记录、上传附件会被 403 capacity_exceeded 挡下；
@@ -2036,6 +2120,12 @@ async function main() {
     capDetail.data?.capacity?.maxRecords === cap?.maxRecords && capDetail.data?.capacity?.atCapacity === false,
     `maxRecords=${capDetail.data?.capacity?.maxRecords} atCapacity=${capDetail.data?.capacity?.atCapacity}`,
   );
+  // 没到期的新表：detail 里要带上时长与「是否已到期」，前端靠它决定「＋」是否置灰
+  check(
+    'table detail exposes the slot (expiry) state',
+    typeof capDetail.data?.slotExpiresAt === 'number' && capDetail.data?.slotExpired === false,
+    `slotExpiresAt=${capDetail.data?.slotExpiresAt} slotExpired=${capDetail.data?.slotExpired}`,
+  );
 
   // 专门用来把「已满」这个状态跑出来的临时表格（默认 = 基础表格）：上限从它自己的
   // 容量快照里读，然后按 maxRecords 灌满（一次 200 行，和批量接口的上限一致）。
@@ -2058,6 +2148,13 @@ async function main() {
       `status=${capTable.status} maxRecords=${maxRecords}`,
     )
   ) {
+    // 没满之前视图照常能加（下面拿它对比「满了以后加不了」）
+    const preFillView = await call(`/api/databases/${capTableId}/views`, {
+      method: 'POST',
+      body: { name: '容量前视图' },
+    });
+    check('a table below its limit can still add views', preFillView.status === 201, `status=${preFillView.status}`);
+
     let filled = 0;
     while (filled < maxRecords) {
       const batch = Math.min(200, maxRecords - filled);
@@ -2122,6 +2219,17 @@ async function main() {
       `status=${rejectedUpload.status} code=${rejectedUpload.data?.error?.code ?? ''}`,
     );
 
+    // 满容量后视图也加不了（只拦新增：已有视图的改名 / 改配置 / 删除照旧）
+    const blockedView = await call(`/api/databases/${capTableId}/views`, {
+      method: 'POST',
+      body: { name: '满了以后的视图' },
+    });
+    check(
+      'adding a view to a full table is rejected',
+      blockedView.status === 403 && blockedView.data?.error?.code === 'capacity_exceeded',
+      `status=${blockedView.status} code=${blockedView.data?.error?.code ?? ''}`,
+    );
+
     // 「只拦增长」：满了以后编辑 / 删除依旧可用（不然数据永远清理不出来）
     const stillEditable = await call(`/api/records/${fullRowId}`, {
       method: 'PATCH',
@@ -2135,6 +2243,16 @@ async function main() {
 
     const freed = await call(`/api/records/${fullRowId}`, { method: 'DELETE' });
     check('deleting a record is still allowed when full', freed.data?.ok === true, `status=${freed.status}`);
+
+    const viewAfterFree = await call(`/api/databases/${capTableId}/views`, {
+      method: 'POST',
+      body: { name: '腾出空间后的视图' },
+    });
+    check(
+      'adding a view works again after freeing space',
+      viewAfterFree.status === 201,
+      `status=${viewAfterFree.status} code=${viewAfterFree.data?.error?.code ?? ''}`,
+    );
 
     const refilled = await call(`/api/databases/${capTableId}/records`, {
       method: 'POST',
@@ -2467,6 +2585,11 @@ async function main() {
       typeof renewalRow?.slotExpiresAt === 'number' &&
       renewalRow.slotExpiresAt > Date.now() + 6 * 24 * 60 * 60 * 1000,
     `expiresAt=${renewalRow?.slotExpiresAt ?? 0}`,
+  );
+  check(
+    'a fresh table is not expired (slotExpired=false in the session payload)',
+    renewalRow?.slotExpired === false,
+    `slotExpired=${renewalRow?.slotExpired}`,
   );
 
   // 续费目标的校验：不存在的表格 404、类型对不上 400

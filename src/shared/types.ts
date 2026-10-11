@@ -508,11 +508,23 @@ export interface DatabaseSummary {
    * 剩余不到 `SLOT_RENEW_WINDOW_DAYS` 天时，清单里这张表后面会出现「续费」（见 `shared/quota.ts`）。
    */
   slotExpiresAt?: number;
+  /**
+   * 这张表是不是「到期未续费」（见 `shared/quota.ts` 的 `slotExpired()`）：
+   * true 时清单里加一个「已到期」标记，表格页只拦增长（不能再加记录 / 视图）。
+   */
+  slotExpired?: boolean;
 }
 
 export interface DatabaseDetail extends CellEditLocks {
   /** 单表容量用量：表格页顶部的只读提示 / 新建前的拦截 */
   capacity: DatabaseCapacity;
+  /**
+   * 这张表的到期时刻（毫秒）：基础 / 专业表格才有（试用表格没有时长，恒为 0）。
+   * 老表格（没有时长记录）按该类型最近一笔购买兜底，和清单里显示的口径一致。
+   */
+  slotExpiresAt: number;
+  /** 到期未续费：只拦增长（不能再加记录 / 视图），其他功能照常（见 `shared/quota.ts`） */
+  slotExpired: boolean;
   id: string;
   name: string;
   icon: string;
@@ -914,6 +926,10 @@ export interface PublicDatabaseResponse extends CellEditLocks {
     ownerName: string;
     /** 单表容量用量：公开链接页到上限后同样只能查看 */
     capacity: DatabaseCapacity;
+    /** 到期时刻（毫秒）：基础 / 专业表格才有；0 = 没有时长（试用表格 / 老表） */
+    slotExpiresAt: number;
+    /** 到期未续费：公开链接页也不能再新增记录（编辑 / 删除照常） */
+    slotExpired: boolean;
   };
   properties: Property[];
   views: ViewDef[];

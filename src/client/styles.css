@@ -692,6 +692,15 @@ textarea.input {
   outline-offset: 1px;
 }
 
+/* 到期未续费：清单里的小红标签（悬停说明「续费后立即恢复」） */
+.kind-tag.expired-tag {
+  flex: none;
+  border-color: var(--capacity-danger);
+  background: #fff;
+  color: var(--capacity-danger);
+  font-weight: 600;
+}
+
 /* 表格页 / 公开链接页顶部的提示条：已到上限，只能查看和查询 */
 .capacity-notice {
   margin: 0;

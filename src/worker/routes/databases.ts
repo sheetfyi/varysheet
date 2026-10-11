@@ -1,5 +1,5 @@
 /** /api/databases* - create / read / update tables, members and share links. */
-import { QUOTA_EXCEEDED } from '../../shared/quota';
+import { QUOTA_EXCEEDED, slotExpired } from '../../shared/quota';
 import { asTableKind, TABLE_KINDS, TABLE_LIMIT_EXCEEDED, tableKindLabel, tableKindMeta } from '../../shared/tableKind';
 import { TEMPLATES, materializeTemplateProperties } from '../../shared/templates';
 import type {
@@ -46,7 +46,7 @@ import {
 } from '../http';
 import { deliverViewInvite, issueViewInvite } from '../invites';
 import { loadTableQuota } from './quota';
-import { allocateSlot, latestPurchaseExpiry, loadSlotAllocations, recordSlotConsumption } from '../slots';
+import { allocateSlot, latestPurchaseExpiry, loadSlotExpiries, recordSlotConsumption, slotExpiryOf } from '../slots';
 import {
   databaseSummaryFromRow,
   memberFromRow,
@@ -134,8 +134,9 @@ export async function listDatabases(env: Env, userId: string): Promise<DatabaseS
   for (const row of rows) {
     row.owner_name = ownerLabel(owners.get(sqlString(row, 'owner_id')));
   }
-  // 表格的到期时间（续费窗口）也在用户库：一次读全自己在基础 / 专业分片上的表的时长
-  const slotExpiresAt = await loadSlotAllocations(env, userId);
+  // 表格的到期时间（续费窗口）也在用户库：一次读全清单里这些表的时长
+  // （按 id 查：别人分享给我的表，时长属于表格所有者）
+  const slotExpiresAt = await loadSlotExpiries(env, rows.map((row) => sqlString(row, 'id')));
   // 迁移（0017）之前建的老表格没有时长记录：退回「该类型最近一笔购买的到期时间」，
   // 这样它们进入最后一周时同样会显示「续费」（真正续费时 resolveRenewTarget() 会现场补一条记录）
   const fallbackExpiry = {
@@ -158,10 +159,13 @@ export async function listDatabases(env: Env, userId: string): Promise<DatabaseS
       // 记录数 + 附件占用：和表格在同一个查询里算出来，避免一张表一次往返
       capacityFromUsage(usageFromRow(row), capacityLimits(env, kind)),
     );
-    // 只有自己拥有的基础 / 专业表格才有时长（续费窗口）：数据在用户库，这里在 JS 里合并
-    if (role === 'owner' && kind !== 'trial') {
-      summary.slotExpiresAt =
-        slotExpiresAt.get(summary.id) ?? (kind === 'pro' ? fallbackExpiry.pro : fallbackExpiry.basic);
+    // 时长：自己拥有的表用它显示「续费」入口；到期未续费的（含别人分享给我的表）
+    // 一律只拦增长 —— 清单里加一个「已到期」标记
+    if (kind !== 'trial') {
+      const expiresAt =
+        slotExpiresAt.get(summary.id) ?? (role === 'owner' ? (kind === 'pro' ? fallbackExpiry.pro : fallbackExpiry.basic) : 0);
+      if (role === 'owner') summary.slotExpiresAt = expiresAt;
+      summary.slotExpired = slotExpired(expiresAt);
     }
     return summary;
   });
@@ -541,6 +545,9 @@ export async function buildDatabaseDetail(
   );
   // 单表容量用量：表格页顶部据此显示「已满，只能查看」的提示条（专业表格不限容量）
   const capacity = await loadDatabaseCapacity(env, db, databaseId, kind);
+  // 到期时间（基础 / 专业表格的时长）：到期后表格页只拦增长（不能再加记录 / 视图），
+  // 提示条与「＋」的置灰都按它来；试用表格恒为 0（没有时长，不算到期）
+  const slotExpiresAt = await slotExpiryOf(env, databaseId, sqlString(row, 'owner_id'), kind);
 
   return {
     id: databaseId,
@@ -551,6 +558,8 @@ export async function buildDatabaseDetail(
     ownerId: sqlString(row, 'owner_id'),
     role: access.role,
     capacity,
+    slotExpiresAt,
+    slotExpired: slotExpired(slotExpiresAt),
     // 表级锁定已移除：字段保留（客户端类型仍需要它），恒为 false
     locked: false,
     viewScoped: scoped,

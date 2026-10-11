@@ -9,8 +9,8 @@
  *   专业表格 pro    不限：两个维度都不判满（`unlimited: true`）
  *
  * 任一维度到上限后，**增长类**写入会被 403 `capacity_exceeded` 挡回去：
- * 新建记录 / 批量新建 / 复制记录 / 上传附件。
- * 查看、搜索、筛选、分页、增量同步、修改已有记录、删除记录**都不受限制** ——
+ * 新建记录 / 批量新建 / 复制记录 / 上传附件 / 新建视图。
+ * 查看、搜索、筛选、分页、增量同步、修改已有记录、删除记录（含删记录时一起清掉的附件）**都不受限制** ——
  * 不然后台满了就再也清理不出空间了。
  *
  * 试用 / 基础表格的「数据保留半年 / 一年」不在写入路径上拦，由定时任务清理，见 `retention.ts`。
@@ -191,7 +191,7 @@ export async function assertDatabaseCanGrow(
   // 任一维度已满就整表停止增长：记录数满了也不该再往上堆附件，反之亦然
   if (capacity.atCapacity) {
     throw forbidden(
-      `${label}已达容量上限（记录 ${capacity.records}/${capacity.maxRecords} 条 · 附件 ${formatLimit(capacity.storageBytes)}/${formatLimit(capacity.maxStorageBytes)}）：可以查看和查询，但不能再新增记录、复制记录或上传附件，请先删除一些数据`,
+      `${label}已达容量上限（记录 ${capacity.records}/${capacity.maxRecords} 条 · 附件 ${formatLimit(capacity.storageBytes)}/${formatLimit(capacity.maxStorageBytes)}）：可以查看和查询，但不能再新增记录、复制记录、上传附件或新建视图，请先删除一些数据`,
       CAPACITY_EXCEEDED,
     );
   }
