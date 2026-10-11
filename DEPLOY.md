@@ -109,7 +109,7 @@ npm run deploy                 # vite build && wrangler deploy
 ## 5. 部署后验证
 
 ```bash
-# 冒烟测试（271 项断言，覆盖两步注册/登录/建表/记录/视图/分享/成员/附件/单表容量/表格类型与名额/改密码/用户管理/会话兜底）
+# 冒烟测试（278 项断言，覆盖两步注册/登录/建表/记录/视图/分享/成员/附件/单表容量/表格类型与名额/删表不退名额/表格续费/改密码/用户管理/会话兜底）
 # 线上跑同一套断言：唯一会改密码的「重置自己密码」只对 @example.* 测试管理员执行，
 # 真实 ADMIN_EMAIL 会自动跳过那 2 项（结果 270/270），不会重置你的密码、也不会踢你下线
 BASE_URL=https://varysheet.<your-subdomain>.workers.dev node scripts/smoke-test.mjs
