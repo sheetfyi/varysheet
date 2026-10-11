@@ -643,7 +643,7 @@ textarea.input {
 /* 容量明细浮层：Portal 到 body + 固定定位，跟随锚点滚动 / 视口变化重算位置 */
 .capacity-pop {
   position: fixed;
-  /* 高于手机端抽屉（50）与弹窗（40），低于轻提示（60）：点「扩容」弹出的提示不会被自己挡住 */
+  /* 高于手机端抽屉（50）与弹窗（52），低于轻提示（60）：点「扩容」弹出的提示不会被自己挡住 */
   z-index: 55;
   /* 窄屏（手机竖屏）时跟着视口收窄，JS 那边的左右夹取才算得准 */
   max-width: calc(100vw - 16px);
@@ -1524,7 +1524,10 @@ textarea.input {
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 40;
+  /* 层级阶梯：手机端抽屉遮罩（45）< 手机端抽屉（50）< 弹窗（52）< 容量明细浮层（55）< 轻提示（60）。
+     弹窗必须高于抽屉：抽屉底部的「?」「改密码」是在抽屉还开着的时候弹 Modal 的，
+     低于抽屉就会像之前那样被侧边栏压住（390 宽的屏上左边 300px 全被挡住）。 */
+  z-index: 52;
   display: grid;
   place-items: center;
   padding: 24px;
