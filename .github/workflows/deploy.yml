@@ -379,6 +379,19 @@ jobs:
           count="$(grep -Eo '[0-9]+/[0-9]+ checks passed' /tmp/smoke-online.log | tail -n 1 || true)"
           echo "- 线上冒烟测试（${BASE_URL}）：${count:-已通过 ✅}" >> "$GITHUB_STEP_SUMMARY"
 
+      # 失败时把冒烟日志里的失败行打到注解里：不登 GitHub 网页（或从 API 读 check-runs）也能定位，
+      # 注释内容也会出现在 job 日志的末尾。
+      - name: 线上冒烟失败时输出失败断言（排障用）
+        if: failure() && steps.online_smoke.outcome == 'failure'
+        run: |
+          set -uo pipefail
+          if [ -f /tmp/smoke-online.log ]; then
+            echo "线上冒烟失败，最后 40 行："
+            tail -n 40 /tmp/smoke-online.log || true
+            first="$(grep -m1 -E 'FAIL' /tmp/smoke-online.log | tr -s ' ' | cut -c1-400 || true)"
+            echo "::error title=线上冒烟失败::${first:-详见 job 日志里的 FAIL 行}"
+          fi
+
       # 收尾：把这次的线上地址写成一条 commit status（`deploy/cloudflare-workers`）。
       # 好处是「push 完不用开网页」——终端里 `git log`、提交页、或
       # `curl -s https://api.github.com/repos/<owner>/<repo>/commits/<sha>/statuses`
@@ -401,7 +414,14 @@ jobs:
             description="build ${GITHUB_SHA:0:7} 已部署"
           else
             state=failure
-            description="部署或线上冒烟测试未通过"
+            # 把线上冒烟里第一条失败断言塞进提交状态（140 字符上限）：
+            # 这样 `curl .../commits/<sha>/statuses` 或 `git log` 里就能直接看到失败原因
+            first_fail=""
+            if [ -f /tmp/smoke-online.log ]; then
+              first_fail="$(grep -m1 -E 'FAIL' /tmp/smoke-online.log | tr -s ' ' | cut -c1-90 || true)"
+            fi
+            description="冒烟失败：${first_fail:-部署或线上冒烟测试未通过}"
+            description="${description:0:140}"
           fi
           body="$(printf '{"state":"%s","context":"deploy/cloudflare-workers","description":"%s","target_url":"%s"}' \
             "$state" "$description" "$DEPLOY_URL")"
