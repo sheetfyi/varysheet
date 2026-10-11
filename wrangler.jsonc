@@ -43,25 +43,25 @@
     {
       "binding": "DB",
       "database_name": "cloudnotion-db",
-      "database_id": "f2d42bbe-dde4-442f-966e-2b4bbfd6a3d3",
+      "database_id": "bdd80300-a90e-48b3-874c-5ae5b7380c7a",
       "migrations_dir": "migrations/control"
     },
     {
       "binding": "DB_TABLES_TRIAL",
       "database_name": "cloudnotion-tables-trial",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "e8d820b4-1102-458f-812f-a2bfb87dfdd4",
       "migrations_dir": "migrations/tables"
     },
     {
       "binding": "DB_TABLES_BASIC",
       "database_name": "cloudnotion-tables-basic",
-      "database_id": "a5ca773b-f41c-4b3b-9067-33c7f0e3db5d",
+      "database_id": "2caa35ec-0087-4fbc-8672-8e7342234250",
       "migrations_dir": "migrations/tables"
     },
     {
       "binding": "DB_TABLES_PRO",
       "database_name": "cloudnotion-tables-pro",
-      "database_id": "546f5c6c-d699-4b2b-a17b-da5d3121118d",
+      "database_id": "bbc9763d-8604-457e-ab46-63add93572c6",
       "migrations_dir": "migrations/tables"
     }
   ],
