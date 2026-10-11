@@ -359,9 +359,10 @@ export interface DatabaseCapacity {
  *
  * 口径（计算见 `src/shared/quota.ts`，服务端在 `GET /api/quota` 里下发）：
  *   - 试用表格：新注册账号就送 1 个（一人一张免费试用表，见 `BASE_TABLE_QUOTA`）；
- *     每成功邀请一位**新用户**注册再多 1 个（`trial_table_grants` 表），不能购买；
- *   - 基础 / 专业表格：新注册账号没有默认名额，每分享一次表格（视图定向分享 /
- *     公开链接 / 协作者）多 1 个**同类型**名额，也可以直接购买。
+ *     每成功邀请一位**新用户**注册再多 1 个（`trial_table_grants` 表），不单卖；
+ *   - 基础表格：没有赠送名额（**分享也不加**），只能购买（9.9 元/月）；
+ *   - 专业表格：每分享一次表格（视图定向分享 / 公开链接 / 协作者）多 1 个，也可以购买
+ *     （99.9 元/月）；购买时可以选择时长（按月 / 按年）。
  * 「已用」只算自己拥有的、未归档的、这一类型的表格，别人分享给你的表不算。
  */
 export interface TableQuota {
@@ -370,9 +371,10 @@ export interface TableQuota {
   /** 已拥有的这一类表格数（不含归档） */
   used: number;
   /**
-   * 分享带来的赠额：
-   *   - 基础 / 专业表格：这一类表格被分享出去的次数（视图定向分享 + 公开链接 + 协作者，各算一次）；
-   *   - 试用表格：成功邀请新用户注册得到的赠额（每邀请一位新用户 +1，见 `trial_table_grants`）。
+   * 赠额：
+   *   - 专业表格：这一类表格被分享出去的次数（视图定向分享 + 公开链接 + 协作者，各算一次）；
+   *   - 试用表格：成功邀请新用户注册得到的赠额（每邀请一位新用户 +1，见 `trial_table_grants`）；
+   *   - 基础表格：恒为 0（分享不赠额，名额只能购买）。
    */
   shared: number;
   /** 这一类通过购买得到的名额（`table_purchases` 里同类型的 count 之和；试用表格恒为 0） */
@@ -394,6 +396,9 @@ export interface TableQuotaSet {
  * 一条购买记录（`table_purchases` 表）。
  * 支付网关还没接入：现在点「购买」会直接写一条 `channel = 'self-serve'` 的流水并
  * 立刻加名额，以后接支付时把订单号写进 `channel` / `note` 即可。
+ *
+ * 价格口径见 `src/shared/tableKind.ts`：基础表格 9.9 元/月、专业表格 99.9 元/月，
+ * 购买时可以按月（1 个月）或按年（12 个月）买，`amountCents` = 单价 × 数量 × 月数。
  */
 export interface TablePurchase {
   id: string;
@@ -401,6 +406,10 @@ export interface TablePurchase {
   kind: TableKind;
   /** 这次买了几个名额 */
   count: number;
+  /** 购买时长（月）：1 = 按月、12 = 按年（可选值见 `tableKind.ts` 的 `PURCHASE_MONTHS`） */
+  months: number;
+  /** 这一单的金额（分） */
+  amountCents: number;
   /** 渠道：自助购买写 `self-serve`，以后可以写支付平台的订单号 */
   channel: string;
   note: string;

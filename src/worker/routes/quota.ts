@@ -1,21 +1,26 @@
 /**
  * /api/quota - 表格名额（按类型分开算：试用 / 基础 / 专业各自还能再添加几张）。
  *
- * 侧边栏「你有 N 个基础表格可」、说明弹窗与购买都用它，口径与 `src/shared/quota.ts`
+ * 侧边栏「你有 N 个表格可添加」、说明弹窗与购买都用它，口径与 `src/shared/quota.ts`
  * 保持一致：
  *   - 已用 = 自己拥有的、未归档的、这一类型的表格数；
- *   - 赠额：基础 / 专业 = 这一类型的表格被分享出去的次数（视图定向分享 + 公开链接 +
- *     协作者，各算一次）；试用 = 成功邀请新用户注册得到的赠额（`trial_table_grants`，
- *     每邀请一位新用户 +1）；
+ *   - 赠额：专业表格 = 这一类型的表格被分享出去的次数（视图定向分享 + 公开链接 +
+ *     协作者，各算一次）；试用表格 = 成功邀请新用户注册得到的赠额（`trial_table_grants`，
+ *     每邀请一位新用户 +1）；基础表格没有赠额（分享也不加，只能购买）；
  *   - 已购买 = `table_purchases` 里这一类型的 count 之和（试用表格不卖，恒为 0）；
  *   - 默认名额：试用 1（新注册就送一张免费试用表）、基础 / 专业 0。
  *
- * 购买走 `POST /api/quota/purchases`（body `{ kind, count }`）：写一条流水并**立刻**
- * 生效 —— 买几个就多几个可添加的表格。支付网关还没接入，渠道先记 `self-serve`，
- * 见 migrations/control/0011_table_kinds_and_purchases.sql 的说明。
+ * 购买走 `POST /api/quota/purchases`（body `{ kind, count, months }`）：按「每月单价 ×
+ * 数量 × 月数」算金额（基础 9.9 元/月、专业 99.9 元/月，见 shared/tableKind.ts），写一条
+ * 流水并**立刻**生效 —— 买几个就多几个可添加的表格。支付网关还没接入，渠道先记
+ * `self-serve`，见 migrations/control/0015_table_purchase_pricing.sql 的说明。
  */
 import { MAX_PURCHASE_COUNT, tableQuotaSetOf } from '../../shared/quota';
-import { BUYABLE_TABLE_KINDS } from '../../shared/tableKind';
+import {
+  BUYABLE_TABLE_KINDS,
+  PURCHASE_MONTHS,
+  purchaseAmountCents,
+} from '../../shared/tableKind';
 import type { TableKind, TablePurchase, TableQuotaSet } from '../../shared/types';
 import { requireUser } from '../auth';
 import {
@@ -41,18 +46,16 @@ const PURCHASE_KINDS = BUYABLE_TABLE_KINDS;
 
 /**
  * 分片里的名额统计列：`used_*`（自己拥有）/ `link_*`（公开链接）/ `view_*` / `member_*`。
- * 公开链接 / 视图定向分享 / 协作者只给基础与专业表格加名额，所以试用只有 `used_trial`
- * 一列 —— 它的赠额来自用户库的 `trial_table_grants`（每成功邀请一位新用户 +1）。
+ * 公开链接 / 视图定向分享 / 协作者只给**专业**表格加名额，所以基础表格与试用表格都
+ * 只有 `used_*` 一列 —— 试用表格的赠额来自用户库的 `trial_table_grants`（每成功邀请
+ * 一位新用户 +1），基础表格没有赠额（只能购买）。
  */
 const QUOTA_COUNT_COLUMNS = [
   'used_trial',
   'used_basic',
   'used_pro',
-  'link_basic',
   'link_pro',
-  'view_basic',
   'view_pro',
-  'member_basic',
   'member_pro',
 ] as const;
 
@@ -74,19 +77,13 @@ export async function loadTableQuota(env: Env, userId: string): Promise<TableQuo
            (SELECT COUNT(*) FROM databases
              WHERE owner_id = ? AND is_archived = 0 AND kind = 'pro') AS used_pro,
            (SELECT COUNT(*) FROM shares s JOIN databases d ON d.id = s.database_id
-             WHERE d.owner_id = ? AND d.is_archived = 0 AND d.kind = 'basic') AS link_basic,
-           (SELECT COUNT(*) FROM shares s JOIN databases d ON d.id = s.database_id
              WHERE d.owner_id = ? AND d.is_archived = 0 AND d.kind = 'pro') AS link_pro,
-           (SELECT COUNT(*) FROM view_shares v JOIN databases d ON d.id = v.database_id
-             WHERE d.owner_id = ? AND d.is_archived = 0 AND d.kind = 'basic') AS view_basic,
            (SELECT COUNT(*) FROM view_shares v JOIN databases d ON d.id = v.database_id
              WHERE d.owner_id = ? AND d.is_archived = 0 AND d.kind = 'pro') AS view_pro,
            (SELECT COUNT(*) FROM database_members m JOIN databases d ON d.id = m.database_id
-             WHERE d.owner_id = ? AND d.is_archived = 0 AND d.kind = 'basic') AS member_basic,
-           (SELECT COUNT(*) FROM database_members m JOIN databases d ON d.id = m.database_id
              WHERE d.owner_id = ? AND d.is_archived = 0 AND d.kind = 'pro') AS member_pro`,
       )
-      .bind(userId, userId, userId, userId, userId, userId, userId, userId, userId)
+      .bind(userId, userId, userId, userId, userId, userId)
       .first<SqlRow>();
     return row ?? {};
   });
@@ -95,11 +92,8 @@ export async function loadTableQuota(env: Env, userId: string): Promise<TableQuo
     used_trial: 0,
     used_basic: 0,
     used_pro: 0,
-    link_basic: 0,
     link_pro: 0,
-    view_basic: 0,
     view_pro: 0,
-    member_basic: 0,
     member_pro: 0,
   };
   for (const scan of scans) {
@@ -129,8 +123,9 @@ export async function loadTableQuota(env: Env, userId: string): Promise<TableQuo
       purchased: 0,
     },
     basic: {
+      // 基础表格没有赠额：分享不再加名额（口径见 shared/quota.ts），名额只能购买
       used: counts.used_basic,
-      shared: counts.link_basic + counts.view_basic + counts.member_basic,
+      shared: 0,
       purchased: sqlNumber(purchaseRow ?? {}, 'bought_basic'),
     },
     pro: {
@@ -148,7 +143,11 @@ async function quotaHandler(ctx: RequestContext): Promise<Response> {
 
 /**
  * 购买表格名额：写一条购买流水 + 立刻加名额，响应里带上最新的完整名额。
- * 支付还没接入，所以现在没有「金额 / 支付凭证」这一步，`channel` 记 `self-serve`。
+ *
+ * body `{ kind, count, months }`：`months` 是购买时长（按月 1 / 按年 12，见
+ * shared/tableKind.ts 的 `PURCHASE_MONTHS`），金额由服务端按「每月单价 × 数量 × 月数」
+ * 算好写进流水（客户端传什么价都不作数）。支付还没接入，所以现在没有「支付凭证」这一步，
+ * `channel` 记 `self-serve`。
  */
 async function purchaseHandler(ctx: RequestContext): Promise<Response> {
   const user = await requireUser(ctx.request, ctx.env);
@@ -158,6 +157,10 @@ async function purchaseHandler(ctx: RequestContext): Promise<Response> {
   const count = Math.floor(asNumberValue(body.count ?? 1, '购买数量'));
   if (count < 1) throw badRequest('购买数量至少 1 个');
   if (count > MAX_PURCHASE_COUNT) throw badRequest(`一次最多购买 ${MAX_PURCHASE_COUNT} 个名额`);
+  const months = Math.floor(asNumberValue(body.months ?? 1, '购买时长'));
+  if (!PURCHASE_MONTHS.includes(months)) {
+    throw badRequest(`购买时长只能选 ${PURCHASE_MONTHS.join(' / ')} 个月（按月 / 按年）`);
+  }
   const note = asString(body.note, '备注', { max: 200 });
 
   const purchase: TablePurchase = {
@@ -165,20 +168,25 @@ async function purchaseHandler(ctx: RequestContext): Promise<Response> {
     userId: user.id,
     kind,
     count,
+    months,
+    amountCents: purchaseAmountCents(kind, count, months),
     channel: 'self-serve',
     note,
     createdAt: Date.now(),
   };
 
   await ctx.env.DB.prepare(
-    `INSERT INTO table_purchases (id, user_id, kind, count, channel, note, created_by, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO table_purchases
+       (id, user_id, kind, count, months, amount_cents, channel, note, created_by, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
     .bind(
       purchase.id,
       purchase.userId,
       purchase.kind,
       purchase.count,
+      purchase.months,
+      purchase.amountCents,
       purchase.channel,
       purchase.note,
       user.id,

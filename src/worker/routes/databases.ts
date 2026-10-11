@@ -616,15 +616,19 @@ async function createHandler(ctx: RequestContext): Promise<Response> {
     );
   }
 
-  // 名额：三类表格各算各的，这一类用完了就得先分享表格或购买名额。
-  // 名额口径见 src/shared/quota.ts（新注册账号默认 0 个基础 / 专业名额，送 1 个试用名额）；
-  // 试用表格不卖，只能靠邀请新用户注册 +1（见 worker/trialGrants.ts）。
+  // 名额：三类表格各算各的，这一类用完了就得先补名额再建表。
+  // 名额口径见 src/shared/quota.ts（新注册账号默认 0 个基础 / 专业名额，送 1 个试用名额）：
+  //   试用表格不卖，只能靠邀请新用户注册 +1（见 worker/trialGrants.ts）；
+  //   基础表格没有赠额（分享也不加），只能购买；
+  //   专业表格每分享一次 +1，也可以购买。
   const quota = await loadTableQuota(ctx.env, user.id);
   if (quota[kind].remaining <= 0) {
     const replenish =
       kind === 'trial'
         ? '每成功邀请一位新用户注册可以 +1（试用表格不能购买）'
-        : '分享表格可以 +1，也可以直接购买名额';
+        : kind === 'basic'
+          ? '基础表格只能购买名额（分享不增加名额）'
+          : '分享专业表格可以 +1，也可以直接购买名额';
     throw forbidden(
       `${tableKindLabel(kind)}名额已用完（共 ${quota[kind].total} 个）：${replenish}`,
       QUOTA_EXCEEDED,

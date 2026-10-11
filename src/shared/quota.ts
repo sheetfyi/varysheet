@@ -6,11 +6,13 @@
  * 变量、不碰数据库）：服务端拿它算 `/api/quota`，前端拿它兜底显示与文案。数据结构见
  * `types.ts` 的 `TableQuota` / `TableQuotaSet`。
  *
- * 三类名额的来源：
- *   试用 新注册账号送 1 个（一人一张免费试用表）+ 每成功邀请一位新用户注册 +1；
- *   基础/专业 新注册账号 0 个，每分享一次同类型表格 +1，也可以直接购买。
+ * 三类名额的来源（2026-10 口径）：
+ *   试用 新注册账号送 1 个（一人一张免费试用表）+ 每成功邀请一位新用户注册 +1，不单卖；
+ *   基础 没有赠送（**分享也不加**）：只能购买，9.9 元/月；
+ *   专业 每分享一次同类型表格（视图定向分享 / 公开链接 / 协作者）+1，也可以购买，
+ *        99.9 元/月。购买时可以按月（1 个月）或按年（12 个月）买，价格口径见 `tableKind.ts`。
  */
-import { asTableKind, tableKindLabel } from './tableKind';
+import { asTableKind, tableKindLabel, tableKindPriceText } from './tableKind';
 import type { TableKind, TableQuota, TableQuotaSet } from './types';
 
 /**
@@ -19,7 +21,7 @@ import type { TableKind, TableQuota, TableQuotaSet } from './types';
  */
 export const BASE_TABLE_QUOTA: Record<TableKind, number> = { trial: 1, basic: 0, pro: 0 };
 
-/** 每分享一次表格（视图定向分享 / 公开链接 / 协作者）就能多添加 1 个同类型表格 */
+/** 每分享一次**专业**表格（视图定向分享 / 公开链接 / 协作者）就能多添加 1 个专业表格 */
 export const SHARE_TABLE_QUOTA = 1;
 
 /** 每成功邀请一位新用户注册（对方真的注册成功），试用表格名额 +1 */
@@ -31,12 +33,13 @@ export const MAX_PURCHASE_COUNT = 10;
 /** 名额用完时的错误码：建表接口 403 用它，前端据此把提示写成「去分享 / 去购买」 */
 export const QUOTA_EXCEEDED = 'quota_exceeded';
 
-/** 名额规则的四句话：侧边栏的说明弹窗原样展示，改口径时只改这里 */
+/** 名额规则：侧边栏的说明弹窗原样展示，改口径时只改这里 */
 export const TABLE_QUOTA_RULES: string[] = [
   '表格分三类：试用表格 / 基础表格 / 专业表格，三边的名额分开计算。',
-  `新注册账号送 1 个试用表格（100 条记录 / 0.5GB 附件 / 数据保留半年）；每成功邀请一位新用户注册再 +${INVITE_TRIAL_TABLE_QUOTA} 个。`,
-  `基础表格与专业表格没有默认名额：每分享一次表格（视图定向分享 / 公开链接 / 协作者），对应类型的可添加数量就 +${SHARE_TABLE_QUOTA}。`,
-  '基础表格与专业表格的名额也可以直接购买（试用表格不卖）：买几个就多几个可添加的表格。',
+  `新注册账号送 ${BASE_TABLE_QUOTA.trial} 个试用表格（100 条记录 / 0.5GB 附件 / 数据保留半年）；每成功邀请一位新用户注册再 +${INVITE_TRIAL_TABLE_QUOTA} 个。试用表格不单卖。`,
+  `基础表格没有赠送名额（分享也不再增加）：只能购买，${tableKindPriceText('basic')}，买几个就多几个可添加的基础表格。`,
+  `专业表格每分享一次（视图定向分享 / 公开链接 / 协作者）可添加数量 +${SHARE_TABLE_QUOTA}，也可以购买（${tableKindPriceText('pro')}）。`,
+  '购买时可以选择时长：按月（1 个月）或按年（12 个月），金额 = 每月单价 × 数量 × 月数。',
 ];
 
 function countOf(value: number | undefined): number {
