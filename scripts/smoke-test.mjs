@@ -216,21 +216,31 @@ async function main() {
   // ------------------------------------------------------ 公开的系统说明接口
   section('public guide (系统使用说明 / 规则与条款)');
   const guide = await call('/api/guide', { cookie: false });
+  // 注意：目标站点可能已经被管理员改过文案（`termsContent` / `guideContent`），所以这里只断言
+  // 「接口公开 + 两份正文与标题齐全 + 指纹格式正确 + 默认标记是布尔值」，并且**在标记为默认时**
+  // 断言正文就是代码里那份默认文案 —— 不改过的站点（本地 / CI）会把这条断言全量跑一遍，
+  // 改过的站点也不会误报。改文案的完整流程在后面「后台 → 系统管理」那一段。
+  const guideTermsDefault = guide.data?.terms?.isDefault;
+  const guideGuideDefault = guide.data?.guide?.isDefault;
   check(
     'the guide endpoint is public and carries both texts',
     guide.status === 200 &&
-      String(guide.data?.terms?.content ?? '').includes('内容合规') &&
-      String(guide.data?.guide?.content ?? '').includes('新建表格') &&
-      guide.data?.terms?.title === '系统规则与内容合规条款' &&
-      guide.data?.guide?.title === '系统使用说明',
-    `status=${guide.status} terms=${String(guide.data?.terms?.title ?? '')} guide=${String(guide.data?.guide?.title ?? '')}`,
+      String(guide.data?.terms?.content ?? '').trim().length > 0 &&
+      String(guide.data?.guide?.content ?? '').trim().length > 0 &&
+      String(guide.data?.terms?.title ?? '') === '系统规则与内容合规条款' &&
+      String(guide.data?.guide?.title ?? '') === '系统使用说明' &&
+      /^[0-9a-f]{8}$/.test(String(guide.data?.terms?.version ?? '')) &&
+      /^[0-9a-f]{8}$/.test(String(guide.data?.guide?.version ?? '')),
+    `status=${guide.status} terms=${String(guide.data?.terms?.content ?? '').length}字 guide=${String(guide.data?.guide?.content ?? '').length}字`,
   );
   check(
-    'the guide reports whether each text is still the built-in default',
-    guide.data?.terms?.isDefault === true &&
-      guide.data?.guide?.isDefault === true &&
-      /^[0-9a-f]{8}$/.test(String(guide.data?.terms?.version ?? '')),
-    `termsDefault=${guide.data?.terms?.isDefault} version=${guide.data?.terms?.version ?? ''}`,
+    'the guide flags whether each text is still the built-in default',
+    (guideTermsDefault === true || guideTermsDefault === false) &&
+      (guideGuideDefault === true || guideGuideDefault === false) &&
+      // 标记为默认 → 正文必须真的是代码里的默认文案（否则就是标错了）
+      (guideTermsDefault !== true || String(guide.data?.terms?.content ?? '').includes('内容合规')) &&
+      (guideGuideDefault !== true || String(guide.data?.guide?.content ?? '').includes('新建表格')),
+    `termsDefault=${guideTermsDefault} guideDefault=${guideGuideDefault} version=${String(guide.data?.terms?.version ?? '')}`,
   );
 
   // ---------------------------------------------------------------- account
@@ -2816,6 +2826,10 @@ async function main() {
     // 「后台 → 站点设置」里的登录页副标题（`login_tagline`）：改完立即生效，公开接口也能拿到
     const customTagline = `内部系统 ${Date.now()}`.slice(0, 40);
     const settingsBefore = await asAdmin('/api/admin/settings');
+    // 跑测试前如果是**自定义**值（不是代码默认文案），跑完要原样放回去 —— 线上站点被冒烟测试改掉
+    // 文案就不好了；下面「清空 → 退回默认」与「放回原值」走同一个 PATCH，按是否默认选一个。
+    const previousTagline = String(settingsBefore.data?.settings?.loginTagline ?? '');
+    const taglineWasDefault = settingsBefore.data?.settings?.loginTaglineIsDefault !== false;
     const savedTagline = await asAdmin('/api/admin/settings', {
       method: 'PATCH',
       body: { loginTagline: customTagline },
@@ -2830,16 +2844,28 @@ async function main() {
         publicBranding.data?.loginTagline === customTagline,
       `status=${savedTagline.status} tagline=${savedTagline.data?.settings?.loginTagline ?? ''}`,
     );
-    const clearedTagline = await asAdmin('/api/admin/settings', { method: 'PATCH', body: { loginTagline: '' } });
+    const restoredTagline = await asAdmin('/api/admin/settings', {
+      method: 'PATCH',
+      body: { loginTagline: taglineWasDefault ? '' : previousTagline },
+    });
     check(
-      'clearing the login tagline falls back to the built-in default',
-      clearedTagline.status === 200 && clearedTagline.data?.settings?.loginTaglineIsDefault === true,
-      `tagline=${clearedTagline.data?.settings?.loginTagline ?? ''}`,
+      taglineWasDefault
+        ? 'clearing the login tagline falls back to the built-in default'
+        : 'the previous login tagline is restored',
+      restoredTagline.status === 200 &&
+        restoredTagline.data?.settings?.loginTagline === previousTagline &&
+        restoredTagline.data?.settings?.loginTaglineIsDefault === taglineWasDefault,
+      `tagline=${restoredTagline.data?.settings?.loginTagline ?? ''} default=${restoredTagline.data?.settings?.loginTaglineIsDefault}`,
     );
 
     // 「后台 → 系统管理」里的系统规则与条款 / 系统使用说明：改完立刻生效（公开接口立刻拿得到）
     const customTerms = `【冒烟测试】内容合规条款 ${Date.now()}：禁止上传违法违规内容。`;
     const customGuide = `【冒烟测试】使用说明 ${Date.now()}：点「添加」新建一张表格。`;
+    // 同上：跑完把原来的正文放回去（原来就是默认文案的话，就是清空 → 退回默认）
+    const previousTerms = String(settingsBefore.data?.settings?.termsContent ?? '');
+    const previousGuide = String(settingsBefore.data?.settings?.guideContent ?? '');
+    const termsWasDefault = settingsBefore.data?.settings?.termsContentIsDefault !== false;
+    const guideWasDefault = settingsBefore.data?.settings?.guideContentIsDefault !== false;
     const savedPolicy = await asAdmin('/api/admin/settings', {
       method: 'PATCH',
       body: { termsContent: customTerms, guideContent: customGuide },
@@ -2860,16 +2886,23 @@ async function main() {
         publicGuideCustom.data?.terms?.version !== guide.data?.terms?.version,
       `before=${guide.data?.terms?.version ?? ''} after=${publicGuideCustom.data?.terms?.version ?? ''}`,
     );
-    const clearedPolicy = await asAdmin('/api/admin/settings', {
+    const restoredPolicy = await asAdmin('/api/admin/settings', {
       method: 'PATCH',
-      body: { termsContent: '', guideContent: '' },
+      body: {
+        termsContent: termsWasDefault ? '' : previousTerms,
+        guideContent: guideWasDefault ? '' : previousGuide,
+      },
     });
     check(
-      'clearing the texts falls back to the built-in defaults',
-      clearedPolicy.status === 200 &&
-        clearedPolicy.data?.settings?.termsContentIsDefault === true &&
-        clearedPolicy.data?.settings?.guideContentIsDefault === true,
-      `termsDefault=${clearedPolicy.data?.settings?.termsContentIsDefault} guideDefault=${clearedPolicy.data?.settings?.guideContentIsDefault}`,
+      termsWasDefault && guideWasDefault
+        ? 'clearing the texts falls back to the built-in defaults'
+        : 'the previous custom texts are restored',
+      restoredPolicy.status === 200 &&
+        restoredPolicy.data?.settings?.termsContent === previousTerms &&
+        restoredPolicy.data?.settings?.guideContent === previousGuide &&
+        restoredPolicy.data?.settings?.termsContentIsDefault === termsWasDefault &&
+        restoredPolicy.data?.settings?.guideContentIsDefault === guideWasDefault,
+      `termsDefault=${restoredPolicy.data?.settings?.termsContentIsDefault} guideDefault=${restoredPolicy.data?.settings?.guideContentIsDefault}`,
     );
 
     const renamed = smokeUser
