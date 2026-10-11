@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "cloudnotion",
+  "name": "varysheet",
   "main": "src/worker/index.ts",
   "compatibility_date": "2026-01-01",
   "compatibility_flags": ["nodejs_compat"],
@@ -21,15 +21,20 @@
 
   // ---- D1 databases ------------------------------------------------------
   // 存储拆成「用户库 + 表格分片库」，详见 docs/storage.md：
-  //   DB               用户库：账号 / 会话 / 站点设置 / 购买记录 / @提醒 / 分片注册表
-  //   DB_TABLES_BASIC  基础表格主分片（表格 / 字段 / 记录 / 视图 / 分享 / 备注 / 附件…）
-  //   DB_TABLES_PRO    专业表格主分片（结构同上）
+  //   DB                 用户库：账号 / 会话 / 站点设置 / 购买记录 / @提醒（note_mentions）
+  //                      / 试用表格的邀请赠额（trial_table_grants）/ 分片注册表
+  //   DB_TABLES_TRIAL    试用表格主分片（100 条记录 / 0.5GB 附件 / 数据保留半年）
+  //   DB_TABLES_BASIC    基础表格主分片（表格 / 字段 / 记录 / 视图 / 分享 / 备注 / 附件…）
+  //   DB_TABLES_PRO      专业表格主分片（结构同上）
   // 建库方式（见 DEPLOY.md 1.1）：
   //   npx wrangler d1 create cloudnotion-db
+  //   npx wrangler d1 create cloudnotion-tables-trial
   //   npx wrangler d1 create cloudnotion-tables-basic
   //   npx wrangler d1 create cloudnotion-tables-pro
   // 把返回的 database_id 填到下面（首次部署必须填真实值；本地 `wrangler dev --local`
-  // 只是按 id 命名本地 sqlite 文件，填占位值也能跑）。
+  // 只是按 id 命名本地 sqlite 文件，填占位值也能跑）。也可以直接跑
+  // `node scripts/sync-d1-ids.mjs --create`，它会按库名在本账户里查、查不到就现建，
+  // 再把 id 回填到这里（CI 的部署步骤就是这么做的）。
   // 迁移目录各自独立：control 目录放用户库的迁移，tables 目录放分片库的迁移
   // （两者结构完全不同，所以不能共用目录）。
   // 注意：数据库名属于基础设施标识，与站点品牌名（vars.APP_NAME）互不相关；
@@ -38,19 +43,25 @@
     {
       "binding": "DB",
       "database_name": "cloudnotion-db",
-      "database_id": "debb8909-afd9-4529-80ed-37be3ae12bbb",
+      "database_id": "f2d42bbe-dde4-442f-966e-2b4bbfd6a3d3",
       "migrations_dir": "migrations/control"
+    },
+    {
+      "binding": "DB_TABLES_TRIAL",
+      "database_name": "cloudnotion-tables-trial",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations/tables"
     },
     {
       "binding": "DB_TABLES_BASIC",
       "database_name": "cloudnotion-tables-basic",
-      "database_id": "11111111-1111-4111-8111-111111111111",
+      "database_id": "a5ca773b-f41c-4b3b-9067-33c7f0e3db5d",
       "migrations_dir": "migrations/tables"
     },
     {
       "binding": "DB_TABLES_PRO",
       "database_name": "cloudnotion-tables-pro",
-      "database_id": "22222222-2222-4222-8222-222222222222",
+      "database_id": "546f5c6c-d699-4b2b-a17b-da5d3121118d",
       "migrations_dir": "migrations/tables"
     }
   ],
@@ -65,9 +76,10 @@
   ],
 
   // ---- 定时任务（Cron Triggers）----------------------------------------
-  // 每天 03:00 UTC（北京时间 11:00）跑一次「基础表格保留期清理」：基础表格里
-  // 超过一年（BASIC_TABLE_RETENTION_DAYS）的记录与附件会被自动清除，专业表格
-  // 不受影响。逻辑见 src/worker/retention.ts，入口是 index.ts 的 scheduled()。
+  // 每天 03:00 UTC（北京时间 11:00）跑一次「保留期清理」：试用表格里超过半年
+  // （TRIAL_TABLE_RETENTION_DAYS）、基础表格里超过一年（BASIC_TABLE_RETENTION_DAYS）
+  // 的记录与附件会被自动清除，专业表格不受影响。逻辑见 src/worker/retention.ts，
+  // 入口是 index.ts 的 scheduled()。
   // 本地调试可以 `npx wrangler dev --test-scheduled` 后请求 /__scheduled 手动触发，
   // 或者用管理员接口 POST /api/admin/maintenance/retention。
   "triggers": {
@@ -83,9 +95,17 @@
     // 专业表格不限容量，这两个值对它没有影响。
     "MAX_DATABASE_RECORDS": "500",
     "MAX_DATABASE_STORAGE_MB": "1024",
+    // 试用表格的单表容量：默认与 shared/tableKind.ts 的口径一致（100 条 / 0.5GB），
+    // 写在这里只是为了不改代码就能临时放宽 / 收紧。改动的效果只作用于**试用表格**，
+    // 基础表格读上面的 MAX_DATABASE_*，专业表格不限容量。
+    "TRIAL_MAX_DATABASE_RECORDS": "100",
+    "TRIAL_MAX_DATABASE_STORAGE_MB": "512",
     // 基础表格的数据保留期（天）：超过这个时间的记录与附件会被定时任务清除；
     // 专业表格永久保留。设成 0 可以关闭自动清理（只建议本地调试时用）。
     "BASIC_TABLE_RETENTION_DAYS": "365",
+    // 试用表格的数据保留期（天，默认 180 = 半年）：口径同 shared/tableKind.ts；
+    // 设成 0 表示关闭试用表格的自动清理。
+    "TRIAL_TABLE_RETENTION_DAYS": "180",
     // set to "false" to close public registration
     "ALLOW_SIGNUP": "true",
     // 注册确认码（邮箱验证）的有效期，分钟

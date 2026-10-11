@@ -120,7 +120,7 @@ export function App() {
   const [siteIconUrl, setSiteIconUrl] = useState<string | null>(null);
   const [user, setUser] = useState<SessionUser | null>(null);
   const [databases, setDatabases] = useState<DatabaseSummary[]>([]);
-  /** 表格名额（基础 / 专业各自还能加几张）：侧边栏显示，登录与刷新列表时更新 */
+  /** 表格名额（试用 / 基础 / 专业各自还能加几张）：侧边栏显示，登录与刷新列表时更新 */
   const [quota, setQuota] = useState<TableQuotaSet | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [detail, setDetail] = useState<DatabaseDetail | null>(null);
@@ -397,7 +397,7 @@ export function App() {
   const createDatabase = useCallback(
     /**
      * 新建表格固定走「空白表格」模板（不传 templateId 时后端就是 blank），不再让用户
-     * 挑选模板；表格类型（基础 / 专业）由侧边栏的表单选，名额按类型扣。
+     * 挑选模板；表格类型（试用 / 基础 / 专业）由侧边栏的表单选，名额按类型扣。
      */
     async ({ name, kind }: { name: string; kind: TableKind }) => {
       const created = await api.createDatabase({ name, kind });

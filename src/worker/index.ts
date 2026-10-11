@@ -20,7 +20,7 @@ import { quotaRoutes } from './routes/quota';
 import { recordRoutes } from './routes/records';
 import { shardRoutes } from './routes/shards';
 import { viewRoutes } from './routes/views';
-import { purgeExpiredBasicData } from './retention';
+import { purgeExpiredTableData } from './retention';
 import { DEFAULT_SITE_NAME } from './settings';
 import type { Env, RequestContext, Route, RouteHandler } from './types';
 
@@ -154,11 +154,11 @@ export default {
 
   /**
    * 定时任务（`wrangler.jsonc` 的 `triggers.crons`，每天 03:00 UTC）：
-   * 清理基础表格里超过保留期（默认一年）的记录与附件 —— 专业表格不受影响。
+   * 清理试用 / 基础表格里超过保留期（默认半年 / 一年）的记录与附件 —— 专业表格不受影响。
    * 逻辑见 `src/worker/retention.ts`；管理员也可以手动跑
    * `POST /api/admin/maintenance/retention`。
    */
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(purgeExpiredBasicData(env).catch(() => undefined));
+    ctx.waitUntil(purgeExpiredTableData(env).catch(() => undefined));
   },
 };

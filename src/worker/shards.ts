@@ -2,19 +2,20 @@
  * 分片路由：表格数据被拆到多个 D1 库（分片）后，「这条数据在哪个库」的判定都走这里。
  *
  * 分工（存储拆分的整体设计见 docs/storage.md）：
- *   用户库 `env.DB`        账号 / 会话 / 站点设置 / 购买记录 / @提醒 / **分片注册表**
+ *   用户库 `env.DB`        账号 / 会话 / 站点设置 / 购买记录 / @提醒（`note_mentions`）/
+ *                          试用表格的邀请赠额（`trial_table_grants`）/ **分片注册表**
  *   表格分片 `databases…`  表格、字段、记录、视图、分享、备注、改动日志、附件、邀请
  *
  * 分片的两种访问方式：
- *   1. **绑定**：`env.DB_TABLES_BASIC` / `env.DB_TABLES_PRO`（wrangler.jsonc 里配的），
- *      零额外开销，主分片走这里；
+ *   1. **绑定**：`env.DB_TABLES_TRIAL` / `env.DB_TABLES_BASIC` / `env.DB_TABLES_PRO`
+ *      （wrangler.jsonc 里配的），零额外开销，主分片走这里；
  *   2. **HTTP API**：按 `database_id` 走 Cloudflare REST 接口（`d1Remote.ts`），
  *      管理员在后台动态新建的备用分片只能这样访问（Worker 的绑定在部署时固定）。
  *
  * 路由信息存在用户库的 `database_shards` 表里，按 isolate 缓存 15 秒；表格 id → 分片
  * 的映射再单独缓存 5 分钟（表格建好之后就不会再搬家了）。
  */
-import { asTableKind } from '../shared/tableKind';
+import { asTableKind, tableKindLabel } from '../shared/tableKind';
 import type { TableKind } from '../shared/types';
 import {
   applySqlStatements,
@@ -59,7 +60,7 @@ export interface ShardRecord {
   kind: TableKind;
   /** Cloudflare D1 的 database_id（uuid）；绑定兜底分片没有这个值 */
   databaseId: string;
-  /** 走 Worker 绑定时填绑定名（`DB_TABLES_BASIC`），否则为 null（走 HTTP 接口） */
+  /** 走 Worker 绑定时填绑定名（`DB_TABLES_TRIAL` / `DB_TABLES_BASIC` / `DB_TABLES_PRO`），否则为 null（走 HTTP 接口） */
   binding: string | null;
   note: string;
   /** 最近一次读到的库大小（字节）；没读到为 null */
@@ -114,6 +115,7 @@ function boundShards(env: Env): ShardRecord[] {
   const now = Date.now();
   const rows: ShardRecord[] = [];
   const bound: Array<[string, TableKind, D1Database | undefined]> = [
+    ['DB_TABLES_TRIAL', 'trial', env.DB_TABLES_TRIAL],
     ['DB_TABLES_BASIC', 'basic', env.DB_TABLES_BASIC],
     ['DB_TABLES_PRO', 'pro', env.DB_TABLES_PRO],
   ];
@@ -137,6 +139,19 @@ function boundShards(env: Env): ShardRecord[] {
 }
 
 /**
+ * 把「绑定上有、注册表里没有」的分片补进列表：绑定分片是代码里钉死的，注册表只是路由
+ * 信息，漏登记（或者老部署没跑 0012 里那段登记示例）不该让这一类表格彻底不可用。
+ * 注册表为空 / 读失败时等价于直接用绑定分片。
+ */
+function mergeBoundShards(env: Env, rows: ShardRecord[]): ShardRecord[] {
+  const bound = boundShards(env);
+  if (!rows.length) return bound;
+  const registered = new Set(rows.map((row) => row.binding ?? ''));
+  const missing = bound.filter((row) => !registered.has(row.binding ?? ''));
+  return missing.length ? [...rows, ...missing] : rows;
+}
+
+/**
  * 全部分片（含停用的，调用方按 `isActive` 过滤）。注册表为空 / 读取失败时退回绑定分片。
  */
 export async function listShards(env: Env, options: { refresh?: boolean } = {}): Promise<ShardRecord[]> {
@@ -152,7 +167,7 @@ export async function listShards(env: Env, options: { refresh?: boolean } = {}):
   } catch (error) {
     console.warn('读取分片注册表失败，先只用绑定上的分片：', error);
   }
-  if (!rows.length) rows = boundShards(env);
+  rows = mergeBoundShards(env, rows);
   listCache = { at: Date.now(), rows };
   return rows;
 }
@@ -251,7 +266,15 @@ export async function findEntityShard(
 
   const shards = await activeShards(env);
   const hits = await Promise.all(
-    shards.map(async (shard) => ((await shardHolds(env, shard, table, column, value)) ? shard : null)),
+    shards.map(async (shard) => {
+      try {
+        return (await shardHolds(env, shard, table, column, value)) ? shard : null;
+      } catch (error) {
+        // 某个分片还没建表 / 连不上时不该让整次探测失败：跳过它，只在命中时缓存
+        console.warn(`探测分片 ${shard.name} 失败：`, error);
+        return null;
+      }
+    }),
   );
   const shard = hits.find((row): row is ShardRecord => row !== null);
   if (!shard) {
@@ -360,11 +383,10 @@ export async function groupDatabaseShards(
 export async function pickShard(env: Env, kind: TableKind): Promise<ShardRecord> {
   const shards = await activeShards(env, kind);
   if (!shards.length) {
-    const label = kind === 'pro' ? '专业' : '基础';
     throw new HttpError(
       503,
       'no_shard_available',
-      `没有可用的${label}表格分片库：请到「后台 → 存储分片」新建一个 D1 库并挂载`,
+      `没有可用的${tableKindLabel(kind)}分片库：请到「后台 → 存储分片」新建一个 D1 库并挂载`,
     );
   }
   return [...shards].sort((a, b) => {

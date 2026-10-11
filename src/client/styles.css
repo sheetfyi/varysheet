@@ -443,7 +443,7 @@ textarea.input {
   margin-bottom: 0;
 }
 
-/* 「专业表格可添加 N 个」那一行：跟在基础表格名额下面，弱化一点 */
+/* 「基础 / 专业表格可添加 N 个」那两行：跟在试用表格名额下面，弱化一点 */
 .quota-pro-line {
   display: flex;
   align-items: center;
@@ -639,7 +639,7 @@ textarea.input {
   color: var(--capacity-danger);
 }
 
-/* 表格类型徽标：基础 / 专业（侧边栏列表、容量浮层标题都用它） */
+/* 表格类型徽标：试用 / 基础 / 专业（侧边栏列表、容量浮层标题都用它） */
 .kind-tag {
   flex: none;
   padding: 0 5px;
@@ -651,6 +651,12 @@ textarea.input {
   font-weight: 500;
   line-height: 15px;
   white-space: nowrap;
+}
+
+/* 试用表格：虚线边框，提示数据只保留半年、名额来自注册赠送或邀请 */
+.kind-tag.trial {
+  border-style: dashed;
+  color: var(--text-soft);
 }
 
 /* 专业表格稍微突出一点：容量与存储时间都不限 */

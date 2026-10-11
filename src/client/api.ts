@@ -46,7 +46,7 @@ import type {
 export interface SessionPayload {
   user: SessionUser | null;
   databases: DatabaseSummary[];
-  /** 表格名额（基础 / 专业各自还能加几张）：登录后侧边栏直接就有数字可用 */
+  /** 表格名额（试用 / 基础 / 专业各自还能加几张）：登录后侧边栏直接就有数字可用 */
   quota: TableQuotaSet | null;
   maxUploadMb: number;
   appName: string;
@@ -263,7 +263,7 @@ export const api = {
   acceptInvite: (token: string, body: { name: string; password: string; tokenInBody?: boolean }) =>
     json<InviteAcceptResponse>(`/api/invites/${encodeURIComponent(token)}/accept`, 'POST', body),
 
-  /** 表格名额（基础 / 专业各自还能加几张）：侧边栏的数字 + 数量说明弹窗 */
+  /** 表格名额（试用 / 基础 / 专业各自还能加几张）：侧边栏的数字 + 数量说明弹窗 */
   quota: () => json<{ quota: TableQuotaSet }>('/api/quota', 'GET'),
   /**
    * 购买表格名额：买几个就多几个可添加的表格（可选基础表格 / 专业表格）。

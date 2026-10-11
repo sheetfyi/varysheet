@@ -1,4 +1,4 @@
--- Varysheet - 表格分片库（基础表格 / 专业表格）初始化
+-- Varysheet - 表格分片库（试用表格 / 基础表格 / 专业表格）初始化
 --
 -- 每个分片库都是一样的结构（表格 / 字段 / 记录 / 视图 / 分享 / 备注 / 改动日志 /
 -- 附件 / 邀请 + 各自的索引）。管理员在后台新建备用分片时，执行的是同一份 DDL
@@ -8,6 +8,7 @@
 --    需要改结构请改那个文件再重新生成，不要手改这里。
 --
 -- 应用方式（每个分片库各执行一次）：
+--   npx wrangler d1 migrations apply cloudnotion-tables-trial --remote
 --   npx wrangler d1 migrations apply cloudnotion-tables-basic --remote
 --   npx wrangler d1 migrations apply cloudnotion-tables-pro --remote
 

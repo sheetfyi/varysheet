@@ -311,16 +311,16 @@ export interface CellEditLocks {
 /* -------------------------------------------------------------- databases */
 
 /**
- * 表格类型：基础表格（`basic`）/ 专业表格（`pro`）。
+ * 表格类型：试用表格（`trial`）/ 基础表格（`basic`）/ 专业表格（`pro`）。
  *
- * 两类的区别（口径见 `src/shared/tableKind.ts`）：
- *   容量     基础：500 条记录 / 1GB 附件        专业：不限
- *   存储时间 基础：1 年（超期自动清除）          专业：永久保留
- *   列数     基础：10 列                        专业：20 列
- *   视图数   基础：3 个                         专业：10 个
+ * 三类的区别（口径见 `src/shared/tableKind.ts`）：
+ *   容量     试用：100 条记录 / 0.5GB 附件   基础：500 条记录 / 1GB 附件   专业：不限
+ *   存储时间 试用：半年（超期自动清除）        基础：1 年（超期自动清除）    专业：永久保留
+ *   列数     试用：10 列                      基础：10 列                 专业：20 列
+ *   视图数   试用：3 个                       基础：3 个                  专业：10 个
  * 名额也按类型分开算（见下面的 `TableQuotaSet`）。
  */
-export type TableKind = 'basic' | 'pro';
+export type TableKind = 'trial' | 'basic' | 'pro';
 
 /**
  * 单表容量用量（记录条数 + 附件占用），随会话与表格详情一起下发。
@@ -358,9 +358,10 @@ export interface DatabaseCapacity {
  * 表格名额：这个账号在**某一种**表格上还能再添加几张（侧边栏「你有 N 个基础表格可」）。
  *
  * 口径（计算见 `src/shared/quota.ts`，服务端在 `GET /api/quota` 里下发）：
- *   - 新注册账号没有默认名额；
- *   - 每分享一次表格（视图定向分享 / 公开链接 / 协作者）多 1 个**同类型**名额；
- *   - 购买名额：买几个就多几个（见 `table_purchases` 表）。
+ *   - 试用表格：新注册账号就送 1 个（一人一张免费试用表，见 `BASE_TABLE_QUOTA`）；
+ *     每成功邀请一位**新用户**注册再多 1 个（`trial_table_grants` 表），不能购买；
+ *   - 基础 / 专业表格：新注册账号没有默认名额，每分享一次表格（视图定向分享 /
+ *     公开链接 / 协作者）多 1 个**同类型**名额，也可以直接购买。
  * 「已用」只算自己拥有的、未归档的、这一类型的表格，别人分享给你的表不算。
  */
 export interface TableQuota {
@@ -368,18 +369,23 @@ export interface TableQuota {
   kind: TableKind;
   /** 已拥有的这一类表格数（不含归档） */
   used: number;
-  /** 已分享出去的这一类表格的次数：视图定向分享 / 公开链接 / 协作者，各算一次 */
+  /**
+   * 分享带来的赠额：
+   *   - 基础 / 专业表格：这一类表格被分享出去的次数（视图定向分享 + 公开链接 + 协作者，各算一次）；
+   *   - 试用表格：成功邀请新用户注册得到的赠额（每邀请一位新用户 +1，见 `trial_table_grants`）。
+   */
   shared: number;
-  /** 这一类通过购买得到的名额（`table_purchases` 里同类型的 count 之和） */
+  /** 这一类通过购买得到的名额（`table_purchases` 里同类型的 count 之和；试用表格恒为 0） */
   purchased: number;
-  /** 总名额 = 默认 0 + 分享次数 + 已购买 */
+  /** 总名额 = 默认（试用 1 / 其它 0）+ 分享或邀请赠额 + 已购买 */
   total: number;
   /** 还能再添加几张（用完为 0，不会出现负数） */
   remaining: number;
 }
 
-/** 两类表格各自的名额：`GET /api/quota`、会话下发与购买响应都用它 */
+/** 三类表格各自的名额：`GET /api/quota`、会话下发与购买响应都用它 */
 export interface TableQuotaSet {
+  trial: TableQuota;
   basic: TableQuota;
   pro: TableQuota;
 }

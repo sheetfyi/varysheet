@@ -45,13 +45,16 @@ CREATE INDEX IF NOT EXISTS idx_database_shards_kind ON database_shards(kind, is_
 CREATE INDEX IF NOT EXISTS idx_database_shards_database ON database_shards(database_id);
 
 -- 3. 首次部署说明
---    注册表为空时，运行时会退回 wrangler.jsonc 里绑定的主分片（DB_TABLES_BASIC /
---    DB_TABLES_PRO），所以这一步之后站点立刻可用。要让后台看到用量、或者挂载
---    动态新建的备用分片，请在「后台 → 存储分片」里挂载，或直接执行：
+--    注册表为空时，运行时会退回 wrangler.jsonc 里绑定的主分片（DB_TABLES_TRIAL /
+--    DB_TABLES_BASIC / DB_TABLES_PRO），所以这一步之后站点立刻可用。要让后台看到用量、
+--    或者挂载动态新建的备用分片，请在「后台 → 存储分片」里挂载，或直接执行：
 --
 --    INSERT INTO database_shards
 --      (id, name, kind, database_id, binding, note, file_size, checked_at, is_active, created_at, updated_at)
 --    VALUES
+--      (lower(hex(randomblob(16))), 'cloudnotion-tables-trial', 'trial',
+--       '<试用分片库的 database_id>', 'DB_TABLES_TRIAL', '主分片', NULL, NULL, 1,
+--       CAST(strftime('%s','now') AS INTEGER) * 1000, CAST(strftime('%s','now') AS INTEGER) * 1000),
 --      (lower(hex(randomblob(16))), 'cloudnotion-tables-basic', 'basic',
 --       '<基础分片库的 database_id>', 'DB_TABLES_BASIC', '主分片', NULL, NULL, 1,
 --       CAST(strftime('%s','now') AS INTEGER) * 1000, CAST(strftime('%s','now') AS INTEGER) * 1000);

@@ -299,8 +299,11 @@ export const MOVED_OUT_TABLES = [
   'databases',
 ] as const;
 
-/** 分片库的类型标签：一张分片只服务一种表格类型 */
-export const SHARD_KINDS = ['basic', 'pro'] as const;
+/**
+ * 分片库的类型标签：一张分片只服务一种表格类型（试用 / 基础 / 专业）。
+ * 试用表格有专门的试用分片库（绑定 `DB_TABLES_TRIAL`，库名 `cloudnotion-tables-trial`）。
+ */
+export const SHARD_KINDS = ['trial', 'basic', 'pro'] as const;
 export type ShardKind = (typeof SHARD_KINDS)[number];
 
 /** D1 单个数据库的硬上限（10GB）：接近时该新建备用分片了 */

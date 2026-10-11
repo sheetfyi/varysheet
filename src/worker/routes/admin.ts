@@ -10,7 +10,7 @@
  *   PATCH  /api/admin/settings             保存上面的设置（Resend 密钥只回传掩码）
  *   POST   /api/admin/settings/icon        上传 / 替换站点图标（multipart，字段名 `file`）
  *   DELETE /api/admin/settings/icon        移除站点图标
- *   POST   /api/admin/maintenance/retention 立刻跑一次基础表格保留期清理（和定时任务同一套逻辑）
+ *   POST   /api/admin/maintenance/retention 立刻跑一次保留期清理（试用 / 基础表格，和定时任务同一套逻辑）
  *
  * 重置密码会让该用户在所有设备上立即下线，并尽力把新密码邮件通知给本人。
  * 删除账号会连同他拥有的表格（记录 / 备注 / 上传文件）一起清理，
@@ -19,7 +19,7 @@
 import { hashPassword, requireAdmin, validatePasswordStrength } from '../auth';
 import { MAX_DELETE_USERS, deleteAdminUsers, loadAdminUser, loadAdminUsers } from '../admin';
 import { passwordResetEmail, sendEmail, shouldEchoCode } from '../email';
-import { purgeExpiredBasicData } from '../retention';
+import { purgeExpiredTableData } from '../retention';
 import {
   asString,
   badRequest,
@@ -239,12 +239,12 @@ async function deleteSettingsIconHandler(ctx: RequestContext): Promise<Response>
 }
 
 /**
- * 运维入口：立刻跑一次「基础表格保留期清理」（每天 03:00 的定时任务是同一套逻辑）。
- * 返回清掉的记录 / 附件数量，等不及定时任务时（或本地验证时）可以直接调它。
+ * 运维入口：立刻跑一次「保留期清理」（试用 / 基础表格，每天 03:00 的定时任务是同一套逻辑）。
+ * 返回按类型拆开的记录 / 附件清理数量，等不及定时任务时（或本地验证时）可以直接调它。
  */
 async function maintenanceRetentionHandler(ctx: RequestContext): Promise<Response> {
   await requireAdmin(ctx.request, ctx.env);
-  return json({ retention: await purgeExpiredBasicData(ctx.env) });
+  return json({ retention: await purgeExpiredTableData(ctx.env) });
 }
 
 export const adminRoutes: Route[] = [

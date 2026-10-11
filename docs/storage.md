@@ -6,7 +6,8 @@ Varysheet 的表格数据**不再和账号数据放在同一个 D1 库里**。D1
 
 | 库 | 绑定 | 放什么 | 迁移目录 |
 | --- | --- | --- | --- |
-| 用户库 | `DB`（`cloudnotion-db`） | 账号 / 会话 / 注册确认码 / 站点设置 / 名额购买流水 / @提醒（`note_mentions`）/ **分片注册表** | `migrations/control` |
+| 用户库 | `DB`（`cloudnotion-db`） | 账号 / 会话 / 注册确认码 / 站点设置 / 名额购买流水 / 试用表格的邀请赠额（`trial_table_grants`）/ @提醒（`note_mentions`）/ **分片注册表** | `migrations/control` |
+| 表格分片 | `DB_TABLES_TRIAL`（`cloudnotion-tables-trial`） | 试用表格的全部数据 | `migrations/tables` |
 | 表格分片 | `DB_TABLES_BASIC`（`cloudnotion-tables-basic`） | 基础表格的全部数据 | `migrations/tables` |
 | 表格分片 | `DB_TABLES_PRO`（`cloudnotion-tables-pro`） | 专业表格的全部数据 | `migrations/tables` |
 | 附件 | `BUCKET`（R2） | 上传的文件本体（元数据在分片里） | — |
@@ -38,7 +39,8 @@ view_shares / cell_edits / notes / database_changes / invites / files
   即使还没登记也能正常工作。
 
 新表格落在哪一片由 `pickShard(env, kind)` 决定：优先绑定分片（走 Worker 绑定最快），
-其次挑当前用量最小的。基础表格只在 `basic` 分片里选，专业表格只在 `pro` 分片里选。
+其次挑当前用量最小的。试用表格只在 `trial` 分片里选，基础表格只在 `basic` 分片里选，
+专业表格只在 `pro` 分片里选。
 
 ## 跨库没有外键
 

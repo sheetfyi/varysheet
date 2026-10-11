@@ -3,6 +3,7 @@
  *
  * 存储拆成了「用户库 + 若干表格分片库」（见 src/worker/shards.ts）：
  *   DB                 用户库：账号 / 会话 / 站点设置 / 购买记录 / @提醒 / 分片注册表
+ *   DB_TABLES_TRIAL    表格分片（试用表格），绑定式访问，最快
  *   DB_TABLES_BASIC    表格分片（基础表格），绑定式访问，最快
  *   DB_TABLES_PRO      表格分片（专业表格），绑定式访问，最快
  * 管理员在后台**动态新建**的备用分片没法加绑定，改用 Cloudflare D1 HTTP 接口访问，
@@ -11,6 +12,8 @@
  */
 export interface Env {
   DB: D1Database;
+  /** 试用表格主分片（可选：没绑定就只用注册表里登记的分片） */
+  DB_TABLES_TRIAL?: D1Database;
   /** 基础表格主分片（可选：没绑定就只用注册表里登记的分片） */
   DB_TABLES_BASIC?: D1Database;
   /** 专业表格主分片（可选） */
@@ -26,10 +29,14 @@ export interface Env {
   /** 站点名称（品牌）的兜底值；管理员可在「后台 → 站点设置」里覆盖（存在 D1 settings 表） */
   APP_NAME?: string;
   MAX_UPLOAD_MB?: string;
-  /** 单张表格的记录数上限（默认 500）：到上限后只能查看 / 查询，不再接受新增 */
+  /** 单张表格的记录数上限（默认 500）：到上限后只能查看 / 查询，不再接受新增；只作用于基础表格 */
   MAX_DATABASE_RECORDS?: string;
-  /** 单张表格的附件总容量上限，单位 MB（默认 1024 = 1GB） */
+  /** 单张表格的附件总容量上限，单位 MB（默认 1024 = 1GB）；只作用于基础表格 */
   MAX_DATABASE_STORAGE_MB?: string;
+  /** 试用表格的记录数上限（默认 100，见 shared/tableKind.ts） */
+  TRIAL_MAX_DATABASE_RECORDS?: string;
+  /** 试用表格的附件总容量上限，单位 MB（默认 512 = 0.5GB） */
+  TRIAL_MAX_DATABASE_STORAGE_MB?: string;
   ALLOW_SIGNUP?: string;
   /**
    * Resend API Key（secret，`npx wrangler secret put RESEND_API_KEY`）；
@@ -54,6 +61,11 @@ export interface Env {
    * 自动清除（只建议本地调试用）。
    */
   BASIC_TABLE_RETENTION_DAYS?: string;
+  /**
+   * 试用表格的数据保留期（天，默认 180 = 半年）：超过这个时间的记录与附件会被定时
+   * 任务自动清除（见 src/worker/retention.ts）；设成 0 表示关闭试用表格的自动清除。
+   */
+  TRIAL_TABLE_RETENTION_DAYS?: string;
 }
 
 export interface AuthedUser {

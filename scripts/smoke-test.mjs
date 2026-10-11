@@ -247,16 +247,27 @@ async function main() {
   check('a new account has no starter table', starterCount === 0, `${starterCount} table(s)`);
   check('session exposes app meta', typeof session.data?.appName === 'string' && typeof session.data?.maxUploadMb === 'number');
 
-  // 表格名额：新账号默认 0 个（原来送 1 个基础表格，已取消）。后面的段落都要建表，
+  // 表格名额：新账号送 1 个试用表格（100 条 / 0.5GB / 保留半年），基础与专业默认 0 个
+  // （原来默认送 1 个基础表格，已取消）。后面的段落都要建表，
   // 这里先买一批基础名额 + 1 个专业名额（主测试表是专业表格），免得每段都撞 403。
   const freshQuota = await call('/api/quota');
   check(
-    'a new account gets no free table slots',
+    'a new account gets one free trial table and nothing else',
     freshQuota.status === 200 &&
+      freshQuota.data?.quota?.trial?.total === 1 &&
+      freshQuota.data?.quota?.trial?.remaining === 1 &&
+      freshQuota.data?.quota?.trial?.purchased === 0 &&
       freshQuota.data?.quota?.basic?.total === 0 &&
       freshQuota.data?.quota?.basic?.remaining === 0 &&
       freshQuota.data?.quota?.pro?.remaining === 0,
-    `basic=${JSON.stringify(freshQuota.data?.quota?.basic)} pro=${JSON.stringify(freshQuota.data?.quota?.pro)}`,
+    `trial=${JSON.stringify(freshQuota.data?.quota?.trial)} basic=${JSON.stringify(freshQuota.data?.quota?.basic)} pro=${JSON.stringify(freshQuota.data?.quota?.pro)}`,
+  );
+  // 试用名额不卖：白名单是 shared/tableKind.ts 的 BUYABLE_TABLE_KINDS
+  const trialSlotPurchase = await call('/api/quota/purchases', { method: 'POST', body: { kind: 'trial', count: 1 } });
+  check(
+    'trial table slots are not for sale',
+    trialSlotPurchase.status === 400,
+    `status=${trialSlotPurchase.status} message=${trialSlotPurchase.data?.error?.message ?? ''}`,
   );
   const bootstrapSlots = await call('/api/quota/purchases', {
     method: 'POST',
@@ -1389,6 +1400,8 @@ async function main() {
   check('the invited signup enforces the password rules', weakInviteAccept.status === 400, `status=${weakInviteAccept.status}`);
 
   // 4) 填昵称 + 密码完成注册：直接拿到会话（cookie 换成新账号）
+  // 接受之前先记下邀请人的试用名额：成功邀请一位新用户应当 +1（见 worker/trialGrants.ts）
+  const inviterTrialBefore = (await call('/api/quota')).data?.quota;
   const accepted = await call(`/api/invites/${inviteToken}/accept`, {
     method: 'POST',
     body: { name: '受邀同事', password: invitePassword },
@@ -1399,6 +1412,8 @@ async function main() {
     `status=${accepted.status} err=${accepted.data?.error?.message ?? ''}`,
   );
   const inviteeSession = await call('/api/session');
+  // 受邀注册的账号也是「新账号」：同样送 1 个试用表格名额
+  const inviteeQuota = (await call('/api/quota')).data?.quota;
   const inviteeTables = inviteeSession.data?.databases ?? [];
   check(
     'the invited account only has the shared table',
@@ -1435,6 +1450,18 @@ async function main() {
 
   // 接受之后，所有者这边才真的多出一条视图分享
   cookie = ownerCookie;
+  const inviterTrialAfter = (await call('/api/quota')).data?.quota;
+  check(
+    'accepting the invite gives the inviter one more trial slot',
+    inviterTrialAfter?.trial?.shared === (inviterTrialBefore?.trial?.shared ?? 0) + 1 &&
+      inviterTrialAfter?.trial?.remaining === (inviterTrialBefore?.trial?.remaining ?? 0) + 1,
+    `shared=${inviterTrialBefore?.trial?.shared}->${inviterTrialAfter?.trial?.shared} remaining=${inviterTrialBefore?.trial?.remaining}->${inviterTrialAfter?.trial?.remaining}`,
+  );
+  check(
+    'the invited account gets its own free trial slot',
+    inviteeQuota?.trial?.total === 1 && inviteeQuota?.trial?.remaining === 1,
+    `trial=${JSON.stringify(inviteeQuota?.trial)}`,
+  );
   const ownerAfterInvite = await call(`/api/databases/${databaseId}`);
   const acceptedShare = (ownerAfterInvite.data?.viewShares ?? []).find((item) => item.email === inviteeEmail);
   check(
@@ -2017,6 +2044,7 @@ async function main() {
     'an account without any slot cannot create a table',
     noSlotAccount.verified?.status === 201 &&
       noSlotLogin.status === 200 &&
+      noSlotQuota?.trial?.remaining === 1 &&
       noSlotQuota?.basic?.remaining === 0 &&
       noSlotTable.status === 403 &&
       noSlotTable.data?.error?.code === 'quota_exceeded',
@@ -2171,6 +2199,65 @@ async function main() {
       proViews.blocked?.status === 403 &&
       proViews.blocked?.data?.error?.code === 'limit_exceeded',
     `views=${proViews.views} status=${proViews.blocked?.status} code=${proViews.blocked?.data?.error?.code ?? ''}`,
+  );
+
+  // ------------------------------- 试用表格（kind = 'trial'，落在专门的试用分片库）
+  section('trial tables (试用表格)');
+  const beforeTrial = (await call('/api/quota')).data?.quota;
+  const trialTable = await call('/api/databases', { method: 'POST', body: { name: '试用测试表', kind: 'trial' } });
+  check(
+    'a trial table can be created on the free slot',
+    trialTable.status === 201 && trialTable.data?.kind === 'trial',
+    `status=${trialTable.status} kind=${trialTable.data?.kind ?? ''} code=${trialTable.data?.error?.code ?? ''}`,
+  );
+  const trialCapacity = trialTable.data?.capacity;
+  check(
+    'a trial table caps records / storage at 100 / 512MB and expires in half a year',
+    trialCapacity?.kind === 'trial' &&
+      trialCapacity?.unlimited === false &&
+      trialCapacity?.maxRecords === 100 &&
+      trialCapacity?.maxStorageBytes === 512 * 1024 * 1024 &&
+      trialCapacity?.retentionDays === 180,
+    `kind=${trialCapacity?.kind} maxRecords=${trialCapacity?.maxRecords} maxStorageBytes=${trialCapacity?.maxStorageBytes} retentionDays=${trialCapacity?.retentionDays}`,
+  );
+  const afterTrialCreate = (await call('/api/quota')).data?.quota;
+  check(
+    'adding a trial table spends exactly one trial slot',
+    afterTrialCreate?.trial?.used === (beforeTrial?.trial?.used ?? 0) + 1 &&
+      afterTrialCreate?.trial?.remaining === (beforeTrial?.trial?.remaining ?? 0) - 1,
+    `used=${beforeTrial?.trial?.used}->${afterTrialCreate?.trial?.used} remaining=${beforeTrial?.trial?.remaining}->${afterTrialCreate?.trial?.remaining}`,
+  );
+
+  // 把剩下的试用名额也用完（注册送的 1 个 + 邀请新用户得到的），再建一张就该 403
+  const trialFillerIds = [];
+  const trialFillerCount = afterTrialCreate?.trial?.remaining ?? 0;
+  for (let index = 0; index < trialFillerCount; index += 1) {
+    const filler = await call('/api/databases', {
+      method: 'POST',
+      body: { name: `试用名额 ${index + 1}`, kind: 'trial' },
+    });
+    if (filler.data?.id) trialFillerIds.push(filler.data.id);
+  }
+  const noTrialSlot = await call('/api/databases', { method: 'POST', body: { name: '没试用名额的表', kind: 'trial' } });
+  check(
+    'running out of trial slots blocks the next trial table',
+    trialFillerIds.length === trialFillerCount &&
+      noTrialSlot.status === 403 &&
+      noTrialSlot.data?.error?.code === 'quota_exceeded' &&
+      // 试用表格的提示要指向「邀请新用户」，不能让人去购买（它不卖）
+      /邀请/.test(String(noTrialSlot.data?.error?.message ?? '')),
+    `filled=${trialFillerIds.length}/${trialFillerCount} status=${noTrialSlot.status} message=${noTrialSlot.data?.error?.message ?? ''}`,
+  );
+
+  for (const id of [trialTable.data?.id, ...trialFillerIds].filter(Boolean)) {
+    await call(`/api/databases/${id}`, { method: 'DELETE' });
+  }
+  const settledTrial = (await call('/api/quota')).data?.quota;
+  check(
+    'deleting the trial tables gives the trial slots back',
+    settledTrial?.trial?.used === beforeTrial?.trial?.used &&
+      settledTrial?.trial?.remaining === beforeTrial?.trial?.remaining,
+    `trial=${JSON.stringify(settledTrial?.trial)}`,
   );
 
   // 清理：删掉分享链接与这两张测试表，别给后面的段落留下干扰

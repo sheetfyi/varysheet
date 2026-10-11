@@ -7,6 +7,9 @@
  * 邀请由表格所有者在分享时发出（`POST /api/databases/:id/view-shares` 带 `invite: true`，
  * 见 routes/databases.ts 与 worker/invites.ts）。这里的邮箱以邀请记录为准，
  * 不接受客户端指定，避免把邀请用成「任意邮箱注册」的后门。
+ *
+ * 接受邀请 = 真的新注册了一个账号，所以邀请人会因此多 1 个**试用表格**名额
+ * （见 worker/trialGrants.ts）；对方本来就有账号时不算「新用户」，不加名额。
  */
 import type { InviteAcceptResponse, InviteDetail } from '../../shared/types';
 import { assertSignupAllowed, createSession, hashPassword, isSecureRequest, sessionCookie, sessionTokenPayload, validatePasswordStrength, wantsTokenInBody } from '../auth';
@@ -26,6 +29,7 @@ import {
 } from '../http';
 import type { RequestContext, Route } from '../types';
 import { logChanges } from '../changes';
+import { grantTrialTable } from '../trialGrants';
 import { touchDatabase } from './databases';
 
 /** 取出一条仍然可用的邀请（不存在 / 用过 / 过期都会给出对应的提示）。 */
@@ -117,6 +121,17 @@ async function acceptInviteHandler(ctx: RequestContext): Promise<Response> {
 
   await applyViewShare(db, invite, userId);
   await consumeInvite(db, invite.id);
+
+  // 真的注册了一位**新用户**才算一次成功邀请：邀请人的试用表格名额 +1
+  // （上面「邮箱已经注册过」那条分支不加 —— 对方本来就有账号，不是新用户；
+  //  同一条邀请重复接受会被 requireInvite 挡成 409，同一个新用户也不会重复加，见 trialGrants.ts）
+  if (invite.invitedBy && invite.invitedBy !== userId) {
+    await grantTrialTable(env, {
+      userId: invite.invitedBy,
+      invitedEmail: email,
+      invitedUserId: userId,
+    });
+  }
 
   // 新账号不再自动建「我的第一个表格」：邀请进来的用户直接看被分享的视图
   const session = await createSession(env, userId);

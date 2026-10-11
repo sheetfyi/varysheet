@@ -1,19 +1,21 @@
 /**
- * /api/quota - 表格名额（按类型分开算：基础表格 / 专业表格各自还能再添加几张）。
+ * /api/quota - 表格名额（按类型分开算：试用 / 基础 / 专业各自还能再添加几张）。
  *
  * 侧边栏「你有 N 个基础表格可」、说明弹窗与购买都用它，口径与 `src/shared/quota.ts`
  * 保持一致：
  *   - 已用 = 自己拥有的、未归档的、这一类型的表格数；
- *   - 已分享 = 这一类型的表格被分享出去的次数（视图定向分享 + 公开链接 + 协作者，
- *     各算一次）；
- *   - 已购买 = `table_purchases` 里这一类型的 count 之和；
- *   - 默认名额 0（新注册账号不再送表格）。
+ *   - 赠额：基础 / 专业 = 这一类型的表格被分享出去的次数（视图定向分享 + 公开链接 +
+ *     协作者，各算一次）；试用 = 成功邀请新用户注册得到的赠额（`trial_table_grants`，
+ *     每邀请一位新用户 +1）；
+ *   - 已购买 = `table_purchases` 里这一类型的 count 之和（试用表格不卖，恒为 0）；
+ *   - 默认名额：试用 1（新注册就送一张免费试用表）、基础 / 专业 0。
  *
  * 购买走 `POST /api/quota/purchases`（body `{ kind, count }`）：写一条流水并**立刻**
  * 生效 —— 买几个就多几个可添加的表格。支付网关还没接入，渠道先记 `self-serve`，
  * 见 migrations/control/0011_table_kinds_and_purchases.sql 的说明。
  */
 import { MAX_PURCHASE_COUNT, tableQuotaSetOf } from '../../shared/quota';
+import { BUYABLE_TABLE_KINDS } from '../../shared/tableKind';
 import type { TableKind, TablePurchase, TableQuotaSet } from '../../shared/types';
 import { requireUser } from '../auth';
 import {
@@ -29,12 +31,21 @@ import {
 } from '../http';
 import type { Env, RequestContext, Route } from '../types';
 import { forEachShardSafe } from '../shards';
+import { countInviteTrialGrants } from '../trialGrants';
 
-/** 一次购买只认这两种类型（写库前先卡住，库里不会出现第三种值） */
-const PURCHASE_KINDS = ['basic', 'pro'] as const;
+/**
+ * 一次购买只认「可以买的类型」（试用表格是免费送的不卖，见 shared/tableKind.ts）：
+ * 写库前先卡住，库里不会出现第三种值。
+ */
+const PURCHASE_KINDS = BUYABLE_TABLE_KINDS;
 
-/** 分片里的名额统计列：`used_*`（自己拥有）/ `link_*`（公开链接）/ `view_*` / `member_*` */
+/**
+ * 分片里的名额统计列：`used_*`（自己拥有）/ `link_*`（公开链接）/ `view_*` / `member_*`。
+ * 公开链接 / 视图定向分享 / 协作者只给基础与专业表格加名额，所以试用只有 `used_trial`
+ * 一列 —— 它的赠额来自用户库的 `trial_table_grants`（每成功邀请一位新用户 +1）。
+ */
 const QUOTA_COUNT_COLUMNS = [
+  'used_trial',
   'used_basic',
   'used_pro',
   'link_basic',
@@ -57,6 +68,8 @@ export async function loadTableQuota(env: Env, userId: string): Promise<TableQuo
       .prepare(
         `SELECT
            (SELECT COUNT(*) FROM databases
+             WHERE owner_id = ? AND is_archived = 0 AND kind = 'trial') AS used_trial,
+           (SELECT COUNT(*) FROM databases
              WHERE owner_id = ? AND is_archived = 0 AND kind = 'basic') AS used_basic,
            (SELECT COUNT(*) FROM databases
              WHERE owner_id = ? AND is_archived = 0 AND kind = 'pro') AS used_pro,
@@ -73,12 +86,13 @@ export async function loadTableQuota(env: Env, userId: string): Promise<TableQuo
            (SELECT COUNT(*) FROM database_members m JOIN databases d ON d.id = m.database_id
              WHERE d.owner_id = ? AND d.is_archived = 0 AND d.kind = 'pro') AS member_pro`,
       )
-      .bind(userId, userId, userId, userId, userId, userId, userId, userId)
+      .bind(userId, userId, userId, userId, userId, userId, userId, userId, userId)
       .first<SqlRow>();
     return row ?? {};
   });
 
   const counts: Record<(typeof QUOTA_COUNT_COLUMNS)[number], number> = {
+    used_trial: 0,
     used_basic: 0,
     used_pro: 0,
     link_basic: 0,
@@ -93,17 +107,27 @@ export async function loadTableQuota(env: Env, userId: string): Promise<TableQuo
     for (const column of QUOTA_COUNT_COLUMNS) counts[column] += sqlNumber(scan.value, column);
   }
 
-  const purchaseRow = await env.DB.prepare(
-    `SELECT
-       (SELECT COALESCE(SUM(p.count), 0) FROM table_purchases p
-         WHERE p.user_id = ? AND p.kind = 'basic') AS bought_basic,
-       (SELECT COALESCE(SUM(p.count), 0) FROM table_purchases p
-         WHERE p.user_id = ? AND p.kind = 'pro') AS bought_pro`,
-  )
-    .bind(userId, userId)
-    .first<SqlRow>();
+  const [purchaseRow, invitedGrants] = await Promise.all([
+    env.DB.prepare(
+      `SELECT
+         (SELECT COALESCE(SUM(p.count), 0) FROM table_purchases p
+           WHERE p.user_id = ? AND p.kind = 'basic') AS bought_basic,
+         (SELECT COALESCE(SUM(p.count), 0) FROM table_purchases p
+           WHERE p.user_id = ? AND p.kind = 'pro') AS bought_pro`,
+    )
+      .bind(userId, userId)
+      .first<SqlRow>(),
+    // 试用名额的赠额在用户库：每成功邀请一位新用户注册写一行（见 worker/trialGrants.ts）
+    countInviteTrialGrants(env, userId),
+  ]);
 
   return tableQuotaSetOf({
+    trial: {
+      // 注册送的那 1 个由 shared/quota.ts 的 BASE_TABLE_QUOTA 直接给出，不在这张流水表里
+      used: counts.used_trial,
+      shared: invitedGrants,
+      purchased: 0,
+    },
     basic: {
       used: counts.used_basic,
       shared: counts.link_basic + counts.view_basic + counts.member_basic,

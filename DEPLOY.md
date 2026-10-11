@@ -9,7 +9,7 @@
 
 ## 1. 创建 D1 数据库并回填 `database_id`
 
-存储拆成了「用户库 + 表格分片库」（见 [docs/storage.md](docs/storage.md)），所以需要**三个** D1 库：
+存储拆成了「用户库 + 表格分片库」（见 [docs/storage.md](docs/storage.md)），所以需要**四个** D1 库：
 
 ```bash
 # 方式一（推荐）：一条命令「按库名查 / 缺了就建」并对齐 wrangler.jsonc，幂等可重跑
@@ -17,6 +17,7 @@ node scripts/sync-d1-ids.mjs --create
 
 # 方式二：手工建，再把打印出来的 database_id 抄进 wrangler.jsonc
 npx wrangler d1 create cloudnotion-db             # 用户库（DB）
+npx wrangler d1 create cloudnotion-tables-trial   # 试用表格分片（DB_TABLES_TRIAL）
 npx wrangler d1 create cloudnotion-tables-basic   # 基础表格分片（DB_TABLES_BASIC）
 npx wrangler d1 create cloudnotion-tables-pro     # 专业表格分片（DB_TABLES_PRO）
 ```
@@ -24,9 +25,9 @@ npx wrangler d1 create cloudnotion-tables-pro     # 专业表格分片（DB_TABL
 `scripts/sync-d1-ids.mjs` 做三件事，顺序就是它的优先级：
 
 1. 环境变量给了 id 就用环境变量（CI 里由仓库 Secrets 提供：`D1_DATABASE_ID` /
-   `D1_TABLES_BASIC_ID` / `D1_TABLES_PRO_ID`）；
+   `D1_TABLES_TRIAL_ID` / `D1_TABLES_BASIC_ID` / `D1_TABLES_PRO_ID`）；
 2. 否则 `wrangler d1 list --json` 列出本账户的库，**按库名**（`cloudnotion-db` /
-   `cloudnotion-tables-basic` / `cloudnotion-tables-pro`）匹配后回填 `wrangler.jsonc`；
+   `cloudnotion-tables-trial` / `cloudnotion-tables-basic` / `cloudnotion-tables-pro`）匹配后回填 `wrangler.jsonc`；
 3. 本账户里没有这个名字的库、且带了 `--create` 时调 `wrangler d1 create` 现建一个。
 
 因为**换账户 / 重建库之后 `database_id` 一定会变、库名不会变**，这个脚本能直接修好
@@ -54,10 +55,10 @@ npx wrangler r2 bucket create cloudnotion-files
 ## 3. 应用迁移
 
 ```bash
-npm run db:migrate:remote      # 用户库 + 两个分片库各跑一遍（control / tables 两个目录）
+npm run db:migrate:remote      # 用户库 + 三个分片库各跑一遍（control / tables 两个目录）
 ```
 
-本地开发用 `npm run db:migrate:local`（同样是三个库一起）。两个迁移目录各自独立：
+本地开发用 `npm run db:migrate:local`（同样是四个库一起）。两个迁移目录各自独立：
 
 - `migrations/control` → 用户库（账号 / 会话 / 设置 / 分片注册表）；
 - `migrations/tables` → 每个分片库（表格数据；文件由 `scripts/sync-shard-schema.mjs` 生成）。
@@ -77,7 +78,8 @@ npm run db:migrate:remote      # 用户库 + 两个分片库各跑一遍（contr
 npm run deploy                 # vite build && wrangler deploy
 ```
 
-部署成功后会得到 `https://cloudnotion.<your-subdomain>.workers.dev`（`workers_dev: true`）。
+部署成功后会得到 `https://varysheet.<your-subdomain>.workers.dev`（`workers_dev: true`；Worker 名取自
+`wrangler.jsonc` 的 `name`，D1 / R2 的名字仍是 `cloudnotion-*` 那套基础设施标识，不受品牌改名影响）。
 自定义域名：在 Cloudflare 控制台为 Worker 添加 Custom Domain，或在 `wrangler.jsonc` 增加 `routes`。
 
 > **定时任务**：`wrangler deploy` 会一并注册 `wrangler.jsonc` 里的 `triggers.crons`
@@ -108,7 +110,7 @@ npm run deploy                 # vite build && wrangler deploy
 # 冒烟测试（259 项断言，覆盖两步注册/登录/建表/记录/视图/分享/成员/附件/单表容量/表格类型与名额/改密码/用户管理/会话兜底）
 # 线上跑同一套断言：唯一会改密码的「重置自己密码」只对 @example.* 测试管理员执行，
 # 真实 ADMIN_EMAIL 会自动跳过那 2 项（结果 257/257），不会重置你的密码、也不会踢你下线
-BASE_URL=https://cloudnotion.<your-subdomain>.workers.dev node scripts/smoke-test.mjs
+BASE_URL=https://varysheet.<your-subdomain>.workers.dev node scripts/smoke-test.mjs
 
 # 路由自检
 npm run check:routes
@@ -146,8 +148,8 @@ npm run check:routes
 | 阶段 | Job | 内容 |
 | --- | --- | --- |
 | 1 | `verify` | `npm ci` → `npm run typecheck`（client + worker）→ `npm run check:routes` → `npm run schema:check`（分片 DDL 与迁移文件是否同步）→ `vite build` |
-| 2 | `e2e` | 本地 D1 迁移（用户库 + 两个分片库） → 后台启动 `wrangler dev --local` → 运行 `scripts/smoke-test.mjs`（断言数见运行日志 / Step Summary） |
-| 3 | `deploy` | `node scripts/sync-d1-ids.mjs --create`（按库名对齐三个 D1 库的 id，缺了就现建） → 确保 R2 桶存在 → `npm run db:migrate:remote` → `vite build` → `wrangler deploy` → 同步可选 Secrets → 对线上地址再跑一遍完整冒烟测试 |
+| 2 | `e2e` | 本地 D1 迁移（用户库 + 三个分片库） → 后台启动 `wrangler dev --local` → 运行 `scripts/smoke-test.mjs`（断言数见运行日志 / Step Summary） |
+| 3 | `deploy` | `node scripts/sync-d1-ids.mjs --create`（按库名对齐四个 D1 库的 id，缺了就现建） → 确保 R2 桶存在 → `npm run db:migrate:remote` → `vite build` → `wrangler deploy` → 同步可选 Secrets → 对线上地址再跑一遍完整冒烟测试 |
 
 ### 6.1 一次性配置 Secrets
 
@@ -158,6 +160,7 @@ npm run check:routes
 | `CLOUDFLARE_API_TOKEN` | ✅ | Cloudflare API 令牌，权限见下 |
 | `CLOUDFLARE_ACCOUNT_ID` | ✅ | `npx wrangler whoami` 里的 Account ID |
 | `D1_DATABASE_ID` | ➖ | 可选。用户库（`DB`）的 id；不填则按库名在本账户里查 |
+| `D1_TABLES_TRIAL_ID` | ➖ | 可选。试用表格分片库（`cloudnotion-tables-trial`）的 id；不填则按库名在本账户里查、查不到才现建 |
 | `D1_TABLES_BASIC_ID` | ➖ | 可选。基础表格分片库（`cloudnotion-tables-basic`）的 id；不填则按库名在本账户里查、查不到才现建 |
 | `D1_TABLES_PRO_ID` | ➖ | 可选。专业表格分片库（`cloudnotion-tables-pro`）的 id；同上 |
 | `RESEND_API_KEY` | ➖ | Resend 发信密钥（注册确认码、重置密码通知）。不配则确认码回显，仅适合测试 |
@@ -186,7 +189,7 @@ npm run check:routes
 
 ### 6.2 首次部署前必须做的一步
 
-`wrangler.jsonc` 里三个 D1 库的 `database_id` 还是占位符、或填的是**别的账户**下的 id 时，
+`wrangler.jsonc` 里四个 D1 库的 `database_id` 还是占位符、或填的是**别的账户**下的 id 时，
 流水线会在 `deploy` 阶段以清晰错误停下（`10181 ... which was not found`）。三种做法：
 
 ```bash
@@ -194,18 +197,19 @@ npm run check:routes
 node scripts/sync-d1-ids.mjs --create
 
 # 方案 B：不动代码，把 id 存成 GitHub Secret（工作流优先采用 Secrets 里的 id）
-#   D1_DATABASE_ID（用户库）、D1_TABLES_BASIC_ID、D1_TABLES_PRO_ID（两个主分片）
+#   D1_DATABASE_ID（用户库）、D1_TABLES_TRIAL_ID、D1_TABLES_BASIC_ID、D1_TABLES_PRO_ID（三个主分片）
 
 # 方案 C：手工建库后回填 wrangler.jsonc
 npx wrangler d1 create cloudnotion-db
+npx wrangler d1 create cloudnotion-tables-trial
 npx wrangler d1 create cloudnotion-tables-basic
 npx wrangler d1 create cloudnotion-tables-pro
 ```
 
 也可以在 Cloudflare 控制台 **Storage & Databases → D1 SQL Database → Create** 建库
-（数据库名必须填 `cloudnotion-db` / `cloudnotion-tables-basic` / `cloudnotion-tables-pro`，
+（数据库名必须填 `cloudnotion-db` / `cloudnotion-tables-trial` / `cloudnotion-tables-basic` / `cloudnotion-tables-pro`，
 工作流是按这些名字建库和执行迁移的），再把列表里的 **Database ID** 回填到 `wrangler.jsonc`
-的 `database_id`，或存成上面三个 Secret。
+的 `database_id`，或存成上面四个 Secret。
 
 CI 的 `deploy` job 跑的就是方案 A 的那条命令：Secrets 优先 → 按库名查本账户 → 查不到就现建。
 所以**换了 Cloudflare 账户**只要 Token 有 `Account · D1 · Edit`，就不用手工抄 id（库名不变，
@@ -306,6 +310,7 @@ npm run dev
 ```bash
 # 导出线上库（SQL 文本）：用户库 + 每个表格分片库
 npx wrangler d1 export cloudnotion-db --remote --output backup-user.sql
+npx wrangler d1 export cloudnotion-tables-trial --remote --output backup-tables-trial.sql
 npx wrangler d1 export cloudnotion-tables-basic --remote --output backup-tables-basic.sql
 npx wrangler d1 export cloudnotion-tables-pro --remote --output backup-tables-pro.sql
 ```

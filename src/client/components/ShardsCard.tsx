@@ -241,7 +241,7 @@ export function ShardsCard({ onToast }: ShardsCardProps) {
             {!loading && shards.length === 0 ? (
               <tr>
                 <td colSpan={8} className="muted small">
-                  还没有登记任何分片：运行时会用 wrangler.jsonc 里绑定的主分片（DB_TABLES_BASIC / DB_TABLES_PRO）。
+                  还没有登记任何分片：运行时会用 wrangler.jsonc 里绑定的主分片（DB_TABLES_TRIAL / DB_TABLES_BASIC / DB_TABLES_PRO）。
                 </td>
               </tr>
             ) : null}

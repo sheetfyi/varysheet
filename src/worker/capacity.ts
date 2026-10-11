@@ -2,6 +2,8 @@
  * 单表容量：记录条数 + 附件占用（R2），以及「只拦增长」的写入门卫。
  *
  * 上限按「表」计算（和侧边栏里每张表后面的进度条一一对应），也按表格类型分：
+ *   试用表格 trial  100 条记录 / 0.5GB 附件（默认值来自 `shared/tableKind.ts`；
+ *                   可用 TRIAL_MAX_DATABASE_RECORDS / TRIAL_MAX_DATABASE_STORAGE_MB 覆盖）
  *   基础表格 basic  500 条记录 / 1GB 附件（默认值来自 `shared/tableKind.ts`；
  *                   可用 MAX_DATABASE_RECORDS / MAX_DATABASE_STORAGE_MB 覆盖）
  *   专业表格 pro    不限：两个维度都不判满（`unlimited: true`）
@@ -11,7 +13,7 @@
  * 查看、搜索、筛选、分页、增量同步、修改已有记录、删除记录**都不受限制** ——
  * 不然后台满了就再也清理不出空间了。
  *
- * 基础表格的「数据保留 1 年」不在写入路径上拦，由定时任务清理，见 `retention.ts`。
+ * 试用 / 基础表格的「数据保留半年 / 一年」不在写入路径上拦，由定时任务清理，见 `retention.ts`。
  */
 import { asTableKind, tableKindMeta } from '../shared/tableKind';
 import type { DatabaseCapacity, TableKind } from '../shared/types';
@@ -22,6 +24,10 @@ import type { Env } from './types';
 export const DEFAULT_MAX_RECORDS = tableKindMeta('basic').maxRecords;
 /** 默认上限：基础表格单表附件合计 1GB */
 export const DEFAULT_MAX_STORAGE_MB = tableKindMeta('basic').maxStorageBytes / (1024 * 1024);
+/** 默认上限：试用表格单表 100 条记录 */
+export const DEFAULT_TRIAL_MAX_RECORDS = tableKindMeta('trial').maxRecords;
+/** 默认上限：试用表格单表附件合计 0.5GB */
+export const DEFAULT_TRIAL_MAX_STORAGE_MB = tableKindMeta('trial').maxStorageBytes / (1024 * 1024);
 
 const BYTES_PER_MB = 1024 * 1024;
 
@@ -56,8 +62,10 @@ export interface DatabaseUsage {
 }
 
 /**
- * 某一类表格的上限：专业表格恒为「不限」；基础表格取 `shared/tableKind.ts` 的默认
- * 值，环境变量 MAX_DATABASE_RECORDS / MAX_DATABASE_STORAGE_MB 可以覆盖（老部署不用改）。
+ * 某一类表格的上限：专业表格恒为「不限」；试用 / 基础表格取 `shared/tableKind.ts` 的
+ * 默认值，环境变量可以覆盖（老部署不用改）：
+ *   试用表格 TRIAL_MAX_DATABASE_RECORDS / TRIAL_MAX_DATABASE_STORAGE_MB
+ *   基础表格 MAX_DATABASE_RECORDS / MAX_DATABASE_STORAGE_MB
  */
 export function capacityLimits(
   env: Env,
@@ -68,12 +76,16 @@ export function capacityLimits(
   if (meta.maxRecords <= 0 && meta.maxStorageBytes <= 0) {
     return { kind: meta.kind, unlimited: true, maxRecords: 0, maxStorageBytes: 0, retentionDays: 0 };
   }
+  // 上限的环境变量按类型分开：试用表格用 TRIAL_MAX_*，基础表格沿用 MAX_*
+  const recordOverride = meta.kind === 'trial' ? env.TRIAL_MAX_DATABASE_RECORDS : env.MAX_DATABASE_RECORDS;
+  const storageOverride =
+    meta.kind === 'trial' ? env.TRIAL_MAX_DATABASE_STORAGE_MB : env.MAX_DATABASE_STORAGE_MB;
   return {
     kind: meta.kind,
     unlimited: false,
-    maxRecords: Math.floor(positiveNumber(env.MAX_DATABASE_RECORDS, meta.maxRecords)),
+    maxRecords: Math.floor(positiveNumber(recordOverride, meta.maxRecords)),
     maxStorageBytes: Math.floor(
-      positiveNumber(env.MAX_DATABASE_STORAGE_MB, meta.maxStorageBytes / BYTES_PER_MB) * BYTES_PER_MB,
+      positiveNumber(storageOverride, meta.maxStorageBytes / BYTES_PER_MB) * BYTES_PER_MB,
     ),
     retentionDays: meta.retentionDays,
   };

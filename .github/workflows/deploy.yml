@@ -9,9 +9,10 @@
 #   CLOUDFLARE_API_TOKEN   必需。Cloudflare API 令牌
 #   CLOUDFLARE_ACCOUNT_ID  必需。Cloudflare 账户 ID
 #   D1_DATABASE_ID         可选。用户库（DB）的 database_id
+#   D1_TABLES_TRIAL_ID     可选。试用表格分片库（DB_TABLES_TRIAL）的 database_id
 #   D1_TABLES_BASIC_ID     可选。基础表格分片库（DB_TABLES_BASIC）的 database_id
 #   D1_TABLES_PRO_ID       可选。专业表格分片库（DB_TABLES_PRO）的 database_id
-#                          三个都不填也能部署：部署步骤会用 `node scripts/sync-d1-ids.mjs --create`
+#                          四个都不填也能部署：部署步骤会用 `node scripts/sync-d1-ids.mjs --create`
 #                          按库名在本账户里查、查不到就现建一个（需要 Account > D1 > Edit）
 #   RESEND_API_KEY         可选。Resend 发信密钥（注册确认码 / 重置密码通知邮件）
 #   RESEND_FROM_EMAIL      可选。发件人，默认 Varysheet <admin@varysheet.com>
@@ -197,16 +198,17 @@ jobs:
             echo "ready=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # 存储拆分之后表格数据在独立的分片库里（见 docs/storage.md）：用户库之外的两个主分片
+      # 存储拆分之后表格数据在独立的分片库里（见 docs/storage.md）：用户库之外的三个主分片
       # 也必须有本账户下的真实 database_id，否则 `wrangler deploy` 会因为绑定指向不存在的库
       # 而失败（错误码 10181）。database_id 会随账户变（库名才是不变的身份），所以这里：
       #   1. 仓库 Secret 提供了 id 就用 Secret（D1_DATABASE_ID / D1_TABLES_*_ID）
       #   2. 没提供就按库名在本账户里查（换账户 / 重建库后自动对上）
       #   3. 本账户里查不到就 `wrangler d1 create` 现建一个（幂等，重跑安全）
-      - name: 同步 D1 数据库 ID（用户库 + 两个分片库）
+      - name: 同步 D1 数据库 ID（用户库 + 三个分片库）
         if: steps.creds.outputs.ready == 'true'
         env:
           D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
+          D1_TABLES_TRIAL_ID: ${{ secrets.D1_TABLES_TRIAL_ID }}
           D1_TABLES_BASIC_ID: ${{ secrets.D1_TABLES_BASIC_ID }}
           D1_TABLES_PRO_ID: ${{ secrets.D1_TABLES_PRO_ID }}
         run: |
@@ -241,7 +243,7 @@ jobs:
           exit 1
 
       # 两个迁移目录各自独立：migrations/control 作用于用户库（cloudnotion-db），
-      # migrations/tables 作用于每个分片库（cloudnotion-tables-basic / -pro）。
+      # migrations/tables 作用于每个分片库（cloudnotion-tables-trial / -basic / -pro）。
       - name: 应用远程 D1 迁移
         if: steps.creds.outputs.ready == 'true' && inputs.skip_migrations != 'true'
         run: |

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // 把 wrangler.jsonc 里 D1 库的 database_id 对齐到「当前账户」：
-//   1. 优先用环境变量覆盖：D1_DATABASE_ID / D1_TABLES_BASIC_ID / D1_TABLES_PRO_ID
-//      （CI 里由仓库 Secrets 提供，见 DEPLOY.md 6.3）
+//   1. 优先用环境变量覆盖：D1_DATABASE_ID / D1_TABLES_TRIAL_ID / D1_TABLES_BASIC_ID /
+//      D1_TABLES_PRO_ID（CI 里由仓库 Secrets 提供，见 DEPLOY.md 6.3）
 //   2. 其次按「库名」在本账户里查：database_id 会随账户变，库名才是不变的身份，
 //      所以换账户 / 重新建库后只要跑一次这个脚本就能修好
 //   3. 本账户里没有这个名字的库、且带了 --create 时，调 `wrangler d1 create` 现建一个
@@ -19,6 +19,7 @@ const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0
 /** 绑定名 -> 可覆盖它的环境变量（CI Secrets / 本地环境变量） */
 const ENV_OVERRIDES = {
   DB: 'D1_DATABASE_ID',
+  DB_TABLES_TRIAL: 'D1_TABLES_TRIAL_ID',
   DB_TABLES_BASIC: 'D1_TABLES_BASIC_ID',
   DB_TABLES_PRO: 'D1_TABLES_PRO_ID',
 };
