@@ -1,6 +1,7 @@
 /**
  * Shared data model types - used by both the Worker (API) and the client (SPA).
  */
+import type { TableOrderStatus, XorpayPayType } from './xorpay';
 
 /* ------------------------------------------------------------------ fields */
 
@@ -393,9 +394,27 @@ export interface TableQuotaSet {
 }
 
 /**
- * 一条购买记录（`table_purchases` 表）。
- * 支付网关还没接入：现在点「购买」会直接写一条 `channel = 'self-serve'` 的流水并
- * 立刻加名额，以后接支付时把订单号写进 `channel` / `note` 即可。
+ * 表格名额的「支付可用性」：`GET /api/quota` 随名额一起下发，
+ * 购买弹窗据此决定显示「微信扫码支付」还是「下单立即到账（自助直通）」。
+ *
+ * 判定见 `src/worker/xorpay.ts` 的 `xorpayConfigOf()`：管理员在「后台 → 站点设置」里
+ * 填好 XorPay 的 appid + app secret（或环境变量里有）就算已开通。
+ */
+export interface TableQuotaPayment {
+  /** 是否已开通在线收款；false = 购买走自助直通（下单即到账，不产生真实收款） */
+  enabled: boolean;
+  /** 当前开放的支付方式（默认只有 `native` = 微信扫码；支付宝用环境变量开） */
+  methods: XorpayPayType[];
+}
+
+/**
+ * 一条购买记录（`table_purchases` 表）—— 名额的真正来源。
+ *
+ * 接入 XorPay 之后，管理员在「后台 → 站点设置」里填好收款信息就自动开启下单：
+ *   1) 下单：服务端算价 → 写一行 `table_orders`（pending）→ 调 XorPay 拿微信支付二维码；
+ *   2) 用户扫码付款；
+ *   3) 回调（或前端轮询触发的主动查单）验签 + 金额核对通过后，才写这里的流水并加名额。
+ * 没配收款信息时是**自助直通**：下单即到账，`channel = 'self-serve'`（本地开发 / CI 用）。
  *
  * 价格口径见 `src/shared/tableKind.ts`：基础表格 9.9 元/月、专业表格 99.9 元/月，
  * 购买时长按「单位 × 数量」选（单位「月」配 1 ~ 12 个，或单位「年」配 1 ~ 5 个），
@@ -411,9 +430,44 @@ export interface TablePurchase {
   months: number;
   /** 这一单的金额（分） */
   amountCents: number;
-  /** 渠道：自助购买写 `self-serve`，以后可以写支付平台的订单号 */
+  /** 渠道：`self-serve`（自助直通）/ `xorpay:native`（微信扫码支付）/ `admin-grant`（管理员赠额） */
   channel: string;
   note: string;
+  createdAt: number;
+}
+
+/**
+ * 一张支付订单（`table_orders` 表，见 migrations/control/0016_table_orders.sql）。
+ *
+ * 下单时冻结金额与名额参数，支付确认（XorPay 回调 / 主动查单）后才写 `table_purchases` 并加名额。
+ * 没配收款信息时是「自助直通」：下单即 `status = 'paid'`（`payType` 空串、`channel = 'self-serve'`）。
+ */
+export interface TableOrder {
+  /** 订单号（同时是传给 XorPay 的 `order_id`，也是弹窗里显示给用户的订单号） */
+  id: string;
+  userId: string;
+  kind: TableKind;
+  /** 这一单买几个名额 */
+  count: number;
+  /** 总时长（月），口径同 `TablePurchase.months` */
+  months: number;
+  /** 应付金额（分），服务端算好冻结在这一行 */
+  amountCents: number;
+  /** 实收金额（分），回调对账用 */
+  paidCents: number;
+  status: TableOrderStatus;
+  /** `native`（微信扫码）/ `alipay`（支付宝当面付）/ `''`（自助直通，没走支付） */
+  payType: XorpayPayType | '';
+  /** `xorpay` | `self-serve`（交付时以 `channel:payType` 写进 `table_purchases.channel`） */
+  channel: string;
+  /** XorPay 平台订单号 */
+  aoid: string;
+  /** 支付二维码内容（前端用 `xorpayQrImageUrl()` 画图） */
+  qr: string;
+  /** 订单过期时刻（毫秒） */
+  expiresAt: number;
+  /** 支付确认时刻（毫秒），未支付为 null */
+  paidAt: number | null;
   createdAt: number;
 }
 
@@ -607,6 +661,19 @@ export interface AdminSettings {
   /** 密钥是否来自 Worker secret / .dev.vars（数据库里没配） */
   resendApiKeyFromEnv: boolean;
   resendFromEmail: string;
+  /**
+   * XorPay 收款（表格名额购买）。管理员在这里填好 appid + app secret 就**立刻开启下单**，
+   * 不用重新部署；环境变量 `XORPAY_AID` / `XORPAY_APP_SECRET` 作为兜底。
+   */
+  xorpayAid: string;
+  /** 密钥的掩码（完整值不回传，前端只在「手动改过」时才提交新值） */
+  resolvedXorpayAppSecret: string;
+  /** 是否已开通在线收款（appid + 密钥都齐）—— false 时购买走「自助直通」（下单即到账） */
+  xorpayConfigured: boolean;
+  /** 密钥是否来自 Worker secret / .dev.vars（数据库里没配） */
+  xorpayAppSecretFromEnv: boolean;
+  /** 当前开放的支付方式（默认只有 `native` = 微信扫码） */
+  xorpayPayTypes: XorpayPayType[];
   /** 代码里的默认值（前端提示「当前用的是默认值」时用） */
   defaults: { siteName: string; adminEmail: string; resendFromEmail: string };
   /** `settings` 表里最后修改时间（0 = 表里什么都没有） */

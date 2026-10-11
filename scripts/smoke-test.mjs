@@ -116,6 +116,29 @@ async function call(path, options = {}) {
   return { status: response.status, ok: response.ok, data, headers: response.headers };
 }
 
+/**
+ * 管理员赠额（`POST /api/admin/quota/grants`）：客服补偿 / 活动赠送用的正式接口。
+ * 线上开通收款（XorPay）之后，测试账号没法再靠 `/api/quota/purchases` 白拿名额，
+ * 改用这个接口发建表名额；拿不到管理员账号（线上没配 ADMIN_EMAIL / 密码不对）时返回 null。
+ */
+async function grantTableSlots(targetEmail, kind, count, months = 1) {
+  const login = await call('/api/auth/login', {
+    cookie: false,
+    method: 'POST',
+    body: { email: ADMIN_EMAIL, password: ADMIN_PASSWORD },
+  });
+  if (login.status !== 200) return null;
+  const adminCookie = String(login.headers.get('set-cookie') ?? '').split(';')[0];
+  if (!adminCookie) return null;
+  const granted = await call('/api/admin/quota/grants', {
+    cookie: false,
+    method: 'POST',
+    headers: { cookie: adminCookie },
+    body: { email: targetEmail, kind, count, months, note: 'smoke bootstrap' },
+  });
+  return granted.status === 201 ? granted.data : null;
+}
+
 async function waitForServer(attempts = 40) {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
@@ -299,27 +322,63 @@ async function main() {
     method: 'POST',
     body: { kind: 'basic', count: 10 },
   });
-  check(
-    'buying basic table slots works out of the box',
-    bootstrapSlots.status === 201 &&
+  if (bootstrapSlots.status === 201) {
+    // 还没开通收款（本地 / CI）：与接入支付之前完全一样 —— 下单即到账
+    check(
+      'buying basic table slots works out of the box',
       bootstrapSlots.data?.purchase?.kind === 'basic' &&
-      bootstrapSlots.data?.purchase?.count === 10 &&
-      // 金额由服务端算：基础 9.9 元/月 × 10 个 × 1 个月 = 9900 分（客户端传什么价都不作数）
-      bootstrapSlots.data?.purchase?.months === 1 &&
-      bootstrapSlots.data?.purchase?.amountCents === 990 * 10 &&
-      bootstrapSlots.data?.quota?.basic?.purchased === 10 &&
-      bootstrapSlots.data?.quota?.basic?.remaining === 10,
-    `purchased=${bootstrapSlots.data?.quota?.basic?.purchased} remaining=${bootstrapSlots.data?.quota?.basic?.remaining} months=${bootstrapSlots.data?.purchase?.months} amountCents=${bootstrapSlots.data?.purchase?.amountCents}`,
-  );
+        bootstrapSlots.data?.purchase?.count === 10 &&
+        // 金额由服务端算：基础 9.9 元/月 × 10 个 × 1 个月 = 9900 分（客户端传什么价都不作数）
+        bootstrapSlots.data?.purchase?.months === 1 &&
+        bootstrapSlots.data?.purchase?.amountCents === 990 * 10 &&
+        bootstrapSlots.data?.quota?.basic?.purchased === 10 &&
+        bootstrapSlots.data?.quota?.basic?.remaining === 10,
+      `purchased=${bootstrapSlots.data?.quota?.basic?.purchased} remaining=${bootstrapSlots.data?.quota?.basic?.remaining} months=${bootstrapSlots.data?.purchase?.months} amountCents=${bootstrapSlots.data?.purchase?.amountCents}`,
+    );
+  } else {
+    // 线上开通了收款（XorPay）：返回 202 + 支付二维码，名额要等付款 —— 改用管理员赠额发建表名额
+    check(
+      'buying table slots now requires an online payment',
+      bootstrapSlots.status === 202 &&
+        typeof bootstrapSlots.data?.pay?.qr === 'string' &&
+        (bootstrapSlots.data?.purchase ?? null) === null &&
+        bootstrapSlots.data?.order?.status === 'pending',
+      `status=${bootstrapSlots.status} qr=${Boolean(bootstrapSlots.data?.pay?.qr)} order=${bootstrapSlots.data?.order?.status}`,
+    );
+    const grantedBasic = await grantTableSlots(email, 'basic', 10, 1);
+    if (grantedBasic) {
+      check(
+        'an admin can grant basic table slots for the smoke run',
+        (grantedBasic.quota?.basic?.purchased ?? 0) >= 10,
+        `purchased=${grantedBasic.quota?.basic?.purchased}`,
+      );
+    } else {
+      console.log(`  skip  basic slot grant  (no admin account for ${ADMIN_EMAIL} on this target)`);
+    }
+  }
   // 主测试表是专业表格，再买 1 个专业名额（「名额不够」的 403 在 table quota 一段验）
   const bootstrapPro = await call('/api/quota/purchases', { method: 'POST', body: { kind: 'pro', count: 1 } });
   check(
     'buying pro table slots works out of the box',
-    bootstrapPro.status === 201 &&
+    (bootstrapPro.status === 201 &&
       bootstrapPro.data?.quota?.pro?.purchased === 1 &&
-      bootstrapPro.data?.quota?.pro?.remaining === 1,
-    `purchased=${bootstrapPro.data?.quota?.pro?.purchased} remaining=${bootstrapPro.data?.quota?.pro?.remaining}`,
+      bootstrapPro.data?.quota?.pro?.remaining === 1) ||
+      // 开通收款时这一单停在「待支付」，下面用赠额补 1 个专业名额
+      bootstrapPro.status === 202,
+    `status=${bootstrapPro.status} purchased=${bootstrapPro.data?.quota?.pro?.purchased} remaining=${bootstrapPro.data?.quota?.pro?.remaining}`,
   );
+  if (bootstrapPro.status !== 201) {
+    const grantedPro = await grantTableSlots(email, 'pro', 1, 1);
+    if (grantedPro) {
+      check(
+        'an admin can grant pro table slots for the smoke run',
+        (grantedPro.quota?.pro?.purchased ?? 0) >= 1,
+        `purchased=${grantedPro.quota?.pro?.purchased}`,
+      );
+    } else {
+      console.log(`  skip  pro slot grant  (no admin account for ${ADMIN_EMAIL} on this target)`);
+    }
+  }
   // 购买时长：时长单位是「月」或「年」（shared/tableKind.ts 的 PURCHASE_UNITS），后面再选数量
   // （月 → 1 ~ 12 个；年 → 1 ~ 5 个）→ 总时长 1 ~ 12 个月 / 12 ~ 60 个月；
   // 白名单是 shared/tableKind.ts 的 `isPurchasableMonths`，金额 = 每月单价 × 数量 × 总月数
@@ -327,26 +386,32 @@ async function main() {
     method: 'POST',
     body: { kind: 'pro', count: 1, months: 12 },
   });
+  // 开通收款时这一单停在「待支付」（202，价格同样由服务端算在订单里），
+  // 而且 ¥1198.8 超过单笔上限 ¥1000 时会被直接挡成 400（见 shared/xorpay.ts 的限额口径）
+  const longTermPriced = longTermPro.data?.purchase ?? longTermPro.data?.order ?? null;
   check(
     'a 12-month term (1 year) prices the purchase on the server',
-    longTermPro.status === 201 &&
-      longTermPro.data?.purchase?.months === 12 &&
+    ((longTermPro.status === 201 || longTermPro.status === 202) &&
+      longTermPriced?.months === 12 &&
       // 专业 99.9 元/月 × 1 个 × 12 个月 = 119880 分
-      longTermPro.data?.purchase?.amountCents === 9990 * 12,
-    `months=${longTermPro.data?.purchase?.months} amountCents=${longTermPro.data?.purchase?.amountCents}`,
+      longTermPriced?.amountCents === 9990 * 12) ||
+      (longTermPro.status === 400 && longTermPro.data?.error?.code === 'order_amount_too_large'),
+    `status=${longTermPro.status} months=${longTermPriced?.months} amountCents=${longTermPriced?.amountCents} code=${longTermPro.data?.error?.code}`,
   );
   // 「时长单位」选「年」时数量是 1 ~ 5：5 年 = 60 个月，是能买的最长时长，价格同样由服务端算
   const fiveYearBasic = await call('/api/quota/purchases', {
     method: 'POST',
     body: { kind: 'basic', count: 1, months: 60 },
   });
+  // 「时长单位」选「年」时数量是 1 ~ 5：5 年 = 60 个月（基础 1 个 ¥594，没超 ¥1000 单笔上限）
+  const fiveYearBasicPriced = fiveYearBasic.data?.purchase ?? fiveYearBasic.data?.order ?? null;
   check(
     'a 5-year term (60 months, the longest) prices the purchase on the server',
-    fiveYearBasic.status === 201 &&
-      fiveYearBasic.data?.purchase?.months === 60 &&
+    (fiveYearBasic.status === 201 || fiveYearBasic.status === 202) &&
+      fiveYearBasicPriced?.months === 60 &&
       // 基础 9.9 元/月 × 1 个 × 60 个月 = 59400 分
-      fiveYearBasic.data?.purchase?.amountCents === 990 * 60,
-    `status=${fiveYearBasic.status} months=${fiveYearBasic.data?.purchase?.months} amountCents=${fiveYearBasic.data?.purchase?.amountCents}`,
+      fiveYearBasicPriced?.amountCents === 990 * 60,
+    `status=${fiveYearBasic.status} months=${fiveYearBasicPriced?.months} amountCents=${fiveYearBasicPriced?.amountCents}`,
   );
   // 凑不出来的总时长一律 400：月只给 1 ~ 12、年只给 1 ~ 5（12 / 24 / 36 / 48 / 60 个月），
   // 所以 13（中间值）、72（6 年）、0 都不在白名单里 —— 下拉框只给合法值，服务端再兜一层
@@ -2140,19 +2205,34 @@ async function main() {
     `basic=${quotaBack?.basic?.remaining} pro=${quotaBack?.pro?.remaining}`,
   );
 
-  // 买 2 个专业表格名额：买几个就多几个（买完立刻可以建专业表）
+  // 买 2 个专业表格名额：买几个就多几个（买完立刻可以建专业表）。
+  // 线上开通收款时这一单会停在「待支付」，改用管理员赠额把这 2 个名额补上，后面的口径不变。
   const proPurchase = await call('/api/quota/purchases', {
     method: 'POST',
     body: { kind: 'pro', count: 2 },
   });
-  check(
-    'buying pro table slots adds exactly that many',
-    proPurchase.status === 201 &&
+  if (proPurchase.status === 201) {
+    check(
+      'buying pro table slots adds exactly that many',
       proPurchase.data?.quota?.pro?.purchased === (beforeQuota?.pro?.purchased ?? 0) + 2 &&
-      proPurchase.data?.quota?.pro?.total === (beforeQuota?.pro?.total ?? 0) + 2 &&
-      proPurchase.data?.quota?.pro?.remaining === (beforeQuota?.pro?.remaining ?? 0) + 2,
-    `purchased=${proPurchase.data?.quota?.pro?.purchased} total=${proPurchase.data?.quota?.pro?.total} remaining=${proPurchase.data?.quota?.pro?.remaining}`,
-  );
+        proPurchase.data?.quota?.pro?.total === (beforeQuota?.pro?.total ?? 0) + 2 &&
+        proPurchase.data?.quota?.pro?.remaining === (beforeQuota?.pro?.remaining ?? 0) + 2,
+      `purchased=${proPurchase.data?.quota?.pro?.purchased} total=${proPurchase.data?.quota?.pro?.total} remaining=${proPurchase.data?.quota?.pro?.remaining}`,
+    );
+  } else {
+    const grantedPro = await grantTableSlots(email, 'pro', 2, 1);
+    if (grantedPro) {
+      check(
+        'an admin grant adds exactly that many pro slots',
+        grantedPro.quota?.pro?.purchased === (beforeQuota?.pro?.purchased ?? 0) + 2 &&
+          grantedPro.quota?.pro?.total === (beforeQuota?.pro?.total ?? 0) + 2 &&
+          grantedPro.quota?.pro?.remaining === (beforeQuota?.pro?.remaining ?? 0) + 2,
+        `status=${proPurchase.status} purchased=${grantedPro.quota?.pro?.purchased} total=${grantedPro.quota?.pro?.total} remaining=${grantedPro.quota?.pro?.remaining}`,
+      );
+    } else {
+      console.log(`  skip  pro slot grant  (no admin account for ${ADMIN_EMAIL} on this target)`);
+    }
+  }
 
   const quotaTable = await call('/api/databases', { method: 'POST', body: { name: '名额测试表' } });
   const afterCreate = (await call('/api/quota')).data?.quota;

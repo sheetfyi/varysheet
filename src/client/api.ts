@@ -34,7 +34,9 @@ import type {
   RowValues,
   SessionUser,
   TableKind,
+  TableOrder,
   TablePurchase,
+  TableQuotaPayment,
   TableQuotaSet,
   VerifyRegistrationResponse,
   ViewConfig,
@@ -42,6 +44,7 @@ import type {
   ViewShareCreatedResponse,
   ViewType,
 } from '../shared/types';
+import type { XorpayPayType } from '../shared/xorpay';
 
 export interface SessionPayload {
   user: SessionUser | null;
@@ -67,6 +70,29 @@ export interface RecordSync extends CellEditLocks {
   record: RowRecord;
   /** 这条记录上的备注，按 `createdAt` 升序 */
   notes: RecordNote[];
+}
+
+/**
+ * 下单响应（`POST /api/quota/orders`）：
+ *   - `purchase` 有值 = 还没开通收款，已经到账（201）；
+ *   - `pay.qr` 有值 = 开通了收款，等扫码付款（202）。
+ */
+export interface QuotaOrderResponse {
+  order: TableOrder;
+  purchase: TablePurchase | null;
+  /** 走支付时的支付信息（二维码内容）；没开通收款时为 null */
+  pay: { payType: XorpayPayType; qr: string } | null;
+  /** 站点是否已开通在线收款 */
+  paymentEnabled: boolean;
+  quota: TableQuotaSet;
+}
+
+/** 查单响应（`GET /api/quota/orders/:id`）：前端每 3 秒轮询一次，到账后自己关掉二维码 */
+export interface QuotaOrderStatus {
+  order: TableOrder;
+  /** 状态中文文案，见 shared/xorpay.ts 的 `orderStatusText()` */
+  statusText: string;
+  quota: TableQuotaSet;
 }
 
 export interface UploadResult {
@@ -235,8 +261,15 @@ export const api = {
    */
   adminSettings: () => json<{ settings: AdminSettings }>('/api/admin/settings', 'GET'),
   /** 保存站点设置；字段留空表示「清掉数据库里的值」，退回 Worker secret / 默认值 */
-  adminUpdateSettings: (body: { siteName?: string; adminEmail?: string; resendApiKey?: string; resendFromEmail?: string }) =>
-    json<AdminSettingsResponse>('/api/admin/settings', 'PATCH', body),
+  adminUpdateSettings: (body: {
+    siteName?: string;
+    adminEmail?: string;
+    resendApiKey?: string;
+    resendFromEmail?: string;
+    /** XorPay 收款（表格名额购买）：填好 appid + app secret 就立刻开启微信扫码下单 */
+    xorpayAid?: string;
+    xorpayAppSecret?: string;
+  }) => json<AdminSettingsResponse>('/api/admin/settings', 'PATCH', body),
   /** 上传 / 替换站点图标（multipart 的 `file` 字段） */
   adminUploadSiteIcon: (file: File) => {
     const form = new FormData();
@@ -275,18 +308,41 @@ export const api = {
   acceptInvite: (token: string, body: { name: string; password: string; tokenInBody?: boolean }) =>
     json<InviteAcceptResponse>(`/api/invites/${encodeURIComponent(token)}/accept`, 'POST', body),
 
-  /** 表格名额（试用 / 基础 / 专业各自还能加几张）：侧边栏的数字 + 数量说明弹窗 */
-  quota: () => json<{ quota: TableQuotaSet }>('/api/quota', 'GET'),
   /**
-   * 购买表格名额：买几个就多几个可添加的表格（可选基础表格 / 专业表格），
-   * 支付还没接入，服务端会立刻写一条购买流水并加名额。
+   * 表格名额（试用 / 基础 / 专业各自还能加几张）+ 收款是否已开通。
+   * 侧边栏的数字、数量说明弹窗（据此决定显示「微信扫码支付」还是「下单立即到账」）都用它。
+   */
+  quota: () => json<{ quota: TableQuotaSet; payment: TableQuotaPayment }>('/api/quota', 'GET'),
+  /**
+   * 购买表格名额（老接口，保留兼容；前端已改走 `createQuotaOrder`）：
+   * 没开通收款时立刻写一条购买流水并加名额（201 + `purchase`）；开通了收款则返回
+   * 202 + `pay.qr`（微信支付二维码），名额要等付款到账。
    * 基础 9.9 元/月、专业 99.9 元/月：`months` 是**总购买时长**
    * （时长单位「月」× 数量 1 ~ 12，或时长单位「年」× 数量 1 ~ 5 → 1 ~ 60 个月，
    * 见 shared/tableKind.ts 的 `purchaseMonthsOf` / `isPurchasableMonths`），
    * 金额由服务端按「每月单价 × 数量 × 月数」算好写进流水。
    */
   purchaseQuota: (body: { kind: TableKind; count: number; months: number; note?: string }) =>
-    json<{ quota: TableQuotaSet; purchase: TablePurchase }>('/api/quota/purchases', 'POST', body),
+    json<{ quota: TableQuotaSet; purchase: TablePurchase | null; order: TableOrder; pay: { payType: XorpayPayType; qr: string } | null }>(
+      '/api/quota/purchases',
+      'POST',
+      body,
+    ),
+  /**
+   * 下单买名额（购买弹窗走这条）：
+   *   - 已开通收款（后台「站点设置」里填了 XorPay appid + app secret）：202 + `pay.qr`，
+   *     要等回调 / 查单确认后名额才到账；
+   *   - 没开通（本地开发 / CI）：201 + `purchase`，立刻到账。
+   */
+  createQuotaOrder: (body: {
+    kind: TableKind;
+    count: number;
+    months: number;
+    payType?: XorpayPayType;
+    note?: string;
+  }) => json<QuotaOrderResponse>('/api/quota/orders', 'POST', body),
+  /** 查一张订单（服务端会顺带向 XorPay 兜底查一次：回调丢了也能补到账） */
+  quotaOrder: (id: string) => json<QuotaOrderStatus>(`/api/quota/orders/${encodeURIComponent(id)}`, 'GET'),
   listDatabases: () => json<{ databases: DatabaseSummary[] }>('/api/databases', 'GET'),
   createDatabase: (body: { name: string; kind?: TableKind; icon?: string; description?: string; templateId?: string }) =>
     json<DatabaseDetail>('/api/databases', 'POST', body),

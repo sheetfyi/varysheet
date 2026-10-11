@@ -29,6 +29,8 @@ import {
   TABLE_KINDS,
   asPurchaseUnitKey,
   asTableKind,
+  formatPriceCents,
+  purchaseAmountCents,
   purchaseMonthsOf,
   purchasePriceText,
   purchaseUnitCountLabel,
@@ -44,9 +46,19 @@ import type {
   InboxMessage,
   SessionUser,
   TableKind,
+  TableQuotaPayment,
   TableQuotaSet,
 } from '../../shared/types';
+import {
+  ORDER_TTL_MINUTES,
+  asXorpayPayType,
+  orderAmountHint,
+  xorpayPayTypeLabel,
+  xorpayQrImageUrl,
+  type XorpayPayType,
+} from '../../shared/xorpay';
 import { ApiError } from '../api';
+import type { QuotaOrderResponse, QuotaOrderStatus } from '../api';
 import type { AdminSection } from './AdminPanel';
 import { InboxButton } from './InboxButton';
 import { Modal } from './Modal';
@@ -85,8 +97,22 @@ interface SidebarProps {
   onInboxRefresh: () => void;
   /** 点开一条私信：已读 + 打开记录卡片并定位到那条备注 */
   onInboxSelect: (message: InboxMessage) => void;
-  /** 购买表格名额（说明弹窗里的「购买」）：由 App 调接口、刷新名额并弹提示 */
-  onBuyQuota: (input: { kind: TableKind; count: number; months: number }) => Promise<void>;
+  /**
+   * 购买表格名额（说明弹窗里的「去支付」）：由 App 下单并刷新名额。
+   * 开通了收款时返回带支付二维码的响应（弹窗自己显示二维码 + 轮询）；没开通则立刻到账。
+   */
+  onOrderQuota: (input: {
+    kind: TableKind;
+    count: number;
+    months: number;
+    payType: XorpayPayType;
+  }) => Promise<QuotaOrderResponse>;
+  /** 轮询查单（App 透传 `GET /api/quota/orders/:id`） */
+  onCheckQuotaOrder: (id: string) => Promise<QuotaOrderStatus>;
+  /** 查单确认到账：把最新名额交给 App（刷新侧边栏数字 + 弹提示），弹窗自己关掉 */
+  onQuotaPaid: (quota: TableQuotaSet) => void;
+  /** 收款是否已开通（`GET /api/quota` 下发）：决定弹窗显示「微信扫码支付」还是「下单立即到账」 */
+  payment: TableQuotaPayment | null;
 }
 
 /** 容量浮层的宽度（与侧边栏同宽；窄屏按视口夹取，不会横向溢出） */
@@ -319,23 +345,47 @@ function KindCapacityTag({
 
 /**
  * 「表格数量说明」弹窗：讲清名额规则（三类分开算、试用靠邀请新用户 +1、基础 / 专业都只能
- * 购买）+ 购买入口（类型 / 时长单位 / 时长数量 / 购买数量 + 价格明细），外加一张「试用表格 /
- * 基础表格 / 专业表格的功能区别（含价格）」对比表。
+ * 购买）+ 购买入口（类型 / 时长单位 / 时长数量 / 购买数量 + 支付方式 + 价格明细），
+ * 外加一张「试用表格 / 基础表格 / 专业表格的功能区别（含价格）」对比表。
  *
- * 数量都是服务端下发的权威值（口径见 `src/shared/quota.ts`）。购买走 App 传进来的
- * `onBuy`（`POST /api/quota/purchases`），成功后会立刻刷新这里的数字。
+ * 数量都是服务端下发的权威值（口径见 `src/shared/quota.ts`）。
+ * 购买走 App 传进来的 `onOrder`（`POST /api/quota/orders`）：
+ *   - 已开通收款（后台「站点设置」里填了 XorPay appid + app secret）：响应带 `pay.qr`，
+ *     弹窗把二维码显示出来并每 3 秒用 `onCheckOrder` 轮询一次，到账后自动关闭并让 App 弹提示；
+ *   - 没开通（本地开发 / CI）：响应带 `purchase`，已经到账，直接关闭。
  */
 function QuotaDialog({
   quota,
+  payment,
   onClose,
-  onBuy,
+  onOrder,
+  onCheckOrder,
+  onPaid,
 }: {
   quota: TableQuotaSet;
+  /** 收款是否已开通（`GET /api/quota` 下发）：决定显示「微信扫码」还是「立即到账」 */
+  payment: TableQuotaPayment | null;
   onClose: () => void;
-  onBuy: (input: { kind: TableKind; count: number; months: number }) => Promise<void>;
+  onOrder: (input: {
+    kind: TableKind;
+    count: number;
+    months: number;
+    payType: XorpayPayType;
+  }) => Promise<QuotaOrderResponse>;
+  onCheckOrder: (id: string) => Promise<QuotaOrderStatus>;
+  onPaid: (quota: TableQuotaSet) => void;
 }) {
   const [kind, setKind] = useState<TableKind>('basic');
   const [count, setCount] = useState(1);
+  /** 支付方式：只开微信时（默认）不显示下拉，直接按微信扫码走 */
+  const [payType, setPayType] = useState<XorpayPayType>('native');
+  /** 待支付的订单：有值时显示二维码并开始轮询 */
+  const [pending, setPending] = useState<{
+    id: string;
+    qr: string;
+    payType: XorpayPayType;
+    amountCents: number;
+  } | null>(null);
   /** 购买时长的**单位**：月（1 个单位 = 1 个月）或 年（1 个单位 = 12 个月，见 shared/tableKind.ts 的 `PURCHASE_UNITS`） */
   const [unitKey, setUnitKey] = useState<PurchaseUnitKey>(DEFAULT_PURCHASE_UNIT);
   /** 购买时长的**数量**（选几个单位）：月 → 1 ~ 12 个月，年 → 1 ~ 5 年 */
@@ -347,6 +397,11 @@ function QuotaDialog({
   const unit = purchaseUnitOf(unitKey);
   /** 总购买时长（月）= 时长单位 × 时长数量；服务端按它算价（`purchaseMonthsOf`） */
   const months = purchaseMonthsOf(unitKey, unitCount);
+  /** 这一单的应付金额（分）：与 service 端同一口径（`tableKind.ts` 的 `purchaseAmountCents`） */
+  const amountCents = purchaseAmountCents(kind, count, months);
+  /** 收款是否已开通 + 开了哪些通道（服务端下发；没拿到就按「没开通」显示，宁可少承诺） */
+  const paymentEnabled = payment?.enabled === true;
+  const payTypes = payment?.methods?.length ? payment.methods : (['native'] as XorpayPayType[]);
 
   /** 换时长单位：数量夹回新单位的范围（比如「12 个月」切到「年」时会收成 5） */
   const changeUnit = (next: string) => {
@@ -355,15 +410,73 @@ function QuotaDialog({
     setUnitCount((current) => Math.min(Math.max(current, target.minUnits), target.maxUnits));
   };
 
+  /**
+   * 轮询查单：每 3 秒一次、最多 100 次（≈5 分钟）。
+   * 订单本身有效期 120 分钟；超时后用户可以重新点「去支付」生成新订单。
+   */
+  useEffect(() => {
+    if (!pending) return;
+    let cancelled = false;
+    let polls = 0;
+    const tick = async () => {
+      if (cancelled) return;
+      polls += 1;
+      try {
+        const result = await onCheckOrder(pending.id);
+        if (cancelled) return;
+        if (result.order.status === 'paid') {
+          // 到账：把最新名额交给 App（刷新侧边栏数字 + 弹提示），弹窗自己关掉
+          onPaid(result.quota);
+          onClose();
+          return;
+        }
+        if (result.order.status === 'expired' || result.order.status === 'amount_mismatch') {
+          setError(result.statusText);
+          setPending(null);
+          return;
+        }
+      } catch {
+        // 轮询失败（断网 / 网关抖动）不打断用户，等下一次
+      }
+      if (polls >= 100) setError('还没收到支付结果；已付款的话请重新打开本弹窗查看，或联系客服');
+    };
+    const timer = window.setInterval(() => void tick(), 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [pending, onCheckOrder, onPaid, onClose]);
+
   const submit = async () => {
     if (busy) return;
+    // 单笔超限（取渠道里最小的限额：支付宝当面付个人 ¥1000）就别下单了，直接告诉用户怎么拆
+    const overLimit = orderAmountHint(amountCents, payType);
+    if (overLimit) {
+      setError(overLimit);
+      return;
+    }
     setBusy(true);
     setError('');
     try {
-      await onBuy({ kind, count, months });
-      onClose();
+      const result = await onOrder({ kind, count, months, payType });
+      if (result.purchase) {
+        // 没开通收款（本地 / CI）：后端已经到账，行为和接入前一样
+        onClose();
+        return;
+      }
+      if (result.pay) {
+        // 开通了收款：显示二维码并开始轮询，付完自动到账
+        setPending({
+          id: result.order.id,
+          qr: result.pay.qr,
+          payType: result.pay.payType,
+          amountCents: result.order.amountCents,
+        });
+      } else {
+        setError('下单成功但没拿到支付二维码，请稍后重试或联系客服');
+      }
     } catch (cause) {
-      setError(cause instanceof ApiError ? cause.message : '购买失败，请稍后再试');
+      setError(cause instanceof ApiError ? cause.message : '下单失败，请稍后再试');
     } finally {
       setBusy(false);
     }
@@ -457,17 +570,55 @@ function QuotaDialog({
             ))}
           </select>
         </label>
-        <button type="button" className="btn primary" disabled={busy} onClick={() => void submit()}>
-          {busy ? '购买中…' : '购买'}
+        {/* 只开了一条通道（默认只开微信）时不显示下拉，避免多一个没有意义的选择 */}
+        {payTypes.length > 1 ? (
+          <label className="field">
+            <span>支付方式</span>
+            <select
+              className="input"
+              value={payType}
+              onChange={(event) => setPayType(asXorpayPayType(event.target.value))}
+            >
+              {payTypes.map((item) => (
+                <option key={item} value={item}>
+                  {item === 'native' ? '微信扫码' : '支付宝（扫码）'}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
+        <button type="button" className="btn primary" disabled={busy || pending !== null} onClick={() => void submit()}>
+          {busy ? '下单中…' : pending ? '等待支付…' : paymentEnabled ? '去支付（微信扫码）' : '立即添加'}
         </button>
       </div>
 
       {/* 价格明细：`9.9 元/月 × 2 个 × 12 个月 = 237.6 元` */}
       <p className="quota-price">价格：{purchasePriceText(kind, count, months)}</p>
 
+      {/* 待支付：微信支付二维码 + 每 3 秒轮询到账（开通收款时才有） */}
+      {pending ? (
+        <div className="quota-pay">
+          <img
+            className="quota-pay-qr"
+            src={xorpayQrImageUrl(pending.qr)}
+            alt={`${xorpayPayTypeLabel(pending.payType)}支付二维码`}
+          />
+          <p className="small">
+            请用{xorpayPayTypeLabel(pending.payType)}
+            {pending.payType === 'native' ? '扫一扫' : '扫描二维码'}支付 {formatPriceCents(pending.amountCents)}
+            ，支付完成后名额自动到账（不用手动刷新）。
+          </p>
+          <p className="small muted">
+            订单号 {pending.id}（{ORDER_TTL_MINUTES} 分钟内有效）
+          </p>
+        </div>
+      ) : null}
+
       {/* 一句话收尾：买完的效果 + 支付口径（细则都在上面的规则列表里，不再重复） */}
       <p className="small muted">
-        买几个就多几个可添加的{meta.label}名额（{tableKindCapacityText(kind)}）；点「购买」立即生效并记一条流水，支付尚未接入。
+        {paymentEnabled
+          ? `买几个就多几个可添加的${meta.label}名额（${tableKindCapacityText(kind)}）；点「去支付」扫码付款，付完名额自动到账。`
+          : `买几个就多几个可添加的${meta.label}名额（${tableKindCapacityText(kind)}）；管理员还没开通在线收款，点「立即添加」会立刻生效并记一条流水。`}
       </p>
       {error ? <p className="error small">{error}</p> : null}
     </Modal>
@@ -513,7 +664,10 @@ export function Sidebar({
   onOpenAdmin,
   onInboxRefresh,
   onInboxSelect,
-  onBuyQuota,
+  onOrderQuota,
+  onCheckQuotaOrder,
+  onQuotaPaid,
+  payment,
 }: SidebarProps) {
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState('');
@@ -764,7 +918,14 @@ export function Sidebar({
       ) : null}
 
       {quotaOpen ? (
-        <QuotaDialog quota={quotaView} onClose={() => setQuotaOpen(false)} onBuy={onBuyQuota} />
+        <QuotaDialog
+          quota={quotaView}
+          payment={payment}
+          onClose={() => setQuotaOpen(false)}
+          onOrder={onOrderQuota}
+          onCheckOrder={onCheckQuotaOrder}
+          onPaid={onQuotaPaid}
+        />
       ) : null}
 
       <div className="sidebar-foot">

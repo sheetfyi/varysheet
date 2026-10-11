@@ -9,6 +9,7 @@
  */
 import { useCallback, useEffect, useState, type ChangeEvent, type FormEvent } from 'react';
 import type { AdminSettings, BrandingResponse } from '../../shared/types';
+import { xorpayPayTypeLabel } from '../../shared/xorpay';
 import { ApiError, api } from '../api';
 import { SiteMark } from './SiteMark';
 
@@ -34,6 +35,10 @@ export function SiteSettingsCard({ onToast, onBrandingChange, onReloadSession }:
   const [apiKey, setApiKey] = useState('');
   /** 密钥框是否被手动改过：false 时显示服务端掩码，保存时不提交这个字段 */
   const [keyEdited, setKeyEdited] = useState(false);
+  /** XorPay 收款（表格名额购买）：appid 是明文（要显示出来核对），app secret 只回传掩码 */
+  const [xorpayAid, setXorpayAid] = useState('');
+  const [xorpaySecret, setXorpaySecret] = useState('');
+  const [xorpaySecretEdited, setXorpaySecretEdited] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [iconBusy, setIconBusy] = useState(false);
@@ -47,6 +52,9 @@ export function SiteSettingsCard({ onToast, onBrandingChange, onReloadSession }:
     setFromEmail(next.resendFromEmail);
     setApiKey('');
     setKeyEdited(false);
+    setXorpayAid(next.xorpayAid);
+    setXorpaySecret('');
+    setXorpaySecretEdited(false);
   }, []);
 
   const load = useCallback(async () => {
@@ -79,11 +87,14 @@ export function SiteSettingsCard({ onToast, onBrandingChange, onReloadSession }:
         resendFromEmail: fromEmail.trim(),
         // 没动过的密钥不提交：PATCH 里没有这个字段 = 保持原样（提交掩码会被当成新密钥存进去）
         ...(keyEdited ? { resendApiKey: apiKey.trim() } : {}),
+        // XorPay 收款：appid 是明文，总是提交（留空 = 关掉收款）；密钥只在手动改过时提交
+        xorpayAid: xorpayAid.trim(),
+        ...(xorpaySecretEdited ? { xorpayAppSecret: xorpaySecret.trim() } : {}),
       });
       applySettings(payload.settings);
       onBrandingChange(payload.branding);
       if (adminChanged) onReloadSession();
-      onToast('站点设置已保存');
+      onToast(payload.settings.xorpayConfigured ? '站点设置已保存：微信扫码收款已开启' : '站点设置已保存');
     } catch (cause) {
       onToast(cause instanceof ApiError ? cause.message : '保存站点设置失败', 'error');
     } finally {
@@ -277,6 +288,64 @@ export function SiteSettingsCard({ onToast, onBrandingChange, onReloadSession }:
             格式：邮箱，或「名称 &lt;邮箱&gt;」；留空 = 用默认值 {settings.defaults.resendFromEmail}
           </span>
         </label>
+
+        {/* XorPay 收款：填好 appid + app secret 保存后立刻开启「微信扫码购买表格名额」 */}
+        <div className="field">
+          <span>XorPay 应用 ID（appid）</span>
+          <input
+            className="input"
+            value={xorpayAid}
+            placeholder="XorPay 后台「应用配置」里的 appid"
+            autoComplete="off"
+            spellCheck={false}
+            onChange={(event) => setXorpayAid(event.target.value)}
+          />
+          <span className="small muted">
+            {settings.xorpayConfigured
+              ? '已开通收款；appid 留空保存 = 关掉收款（购买退回「下单立即到账」）'
+              : '还没开通收款：现在购买名额会直接到账、不真的收钱。填上 appid + app secret 保存后立刻开启微信扫码支付'}
+          </span>
+        </div>
+
+        <div className="field">
+          <span>XorPay 应用密钥（app secret）</span>
+          <div className="row gap">
+            <input
+              className="input"
+              value={xorpaySecretEdited ? xorpaySecret : settings.resolvedXorpayAppSecret}
+              placeholder="XorPay 后台「应用配置」里的 app secret"
+              autoComplete="off"
+              spellCheck={false}
+              onFocus={() => {
+                if (!xorpaySecretEdited) {
+                  setXorpaySecretEdited(true);
+                  setXorpaySecret('');
+                }
+              }}
+              onChange={(event) => {
+                setXorpaySecretEdited(true);
+                setXorpaySecret(event.target.value);
+              }}
+            />
+            {xorpaySecretEdited ? (
+              <button
+                type="button"
+                className="btn ghost small"
+                onClick={() => {
+                  setXorpaySecretEdited(false);
+                  setXorpaySecret('');
+                }}
+              >
+                还原
+              </button>
+            ) : null}
+          </div>
+          <span className="small muted">
+            {settings.xorpayAppSecretFromEnv
+              ? '当前生效的是 Worker secret / .dev.vars 里的密钥；要换就直接填入新的'
+              : `支付方式：${settings.xorpayPayTypes.map((item) => xorpayPayTypeLabel(item)).join(' / ') || '未开通'}；密钥只保存在服务端（不回传完整值），保存后立刻生效、不用重新部署`}
+          </span>
+        </div>
 
         <div className="row gap settings-actions">
           <button className="btn primary" type="submit" disabled={saving}>

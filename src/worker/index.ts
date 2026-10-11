@@ -16,6 +16,7 @@ import { inviteRoutes } from './routes/invites';
 import { noteRoutes } from './routes/notes';
 import { propertyRoutes } from './routes/properties';
 import { publicRoutes } from './routes/public';
+import { paymentRoutes } from './routes/payments';
 import { quotaRoutes } from './routes/quota';
 import { recordRoutes } from './routes/records';
 import { shardRoutes } from './routes/shards';
@@ -31,6 +32,7 @@ const API_ROUTES: Route[] = [
   ...adminRoutes,
   ...shardRoutes,
   ...quotaRoutes,
+  ...paymentRoutes, // 表格名额下单 / 查单 / XorPay 回调
   ...databaseRoutes,
   ...propertyRoutes,
   ...recordRoutes,

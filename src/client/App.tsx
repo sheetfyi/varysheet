@@ -11,10 +11,12 @@ import type {
   InboxResponse,
   SessionUser,
   TableKind,
+  TableQuotaPayment,
   TableQuotaSet,
 } from '../shared/types';
 import { purchaseMonthsLabel, tableKindLabel } from '../shared/tableKind';
-import { ApiError, api, setSessionToken, type SessionPayload } from './api';
+import type { XorpayPayType } from '../shared/xorpay';
+import { ApiError, api, setSessionToken, type QuotaOrderResponse, type SessionPayload } from './api';
 import { applyBranding } from './branding';
 import { AdminSystemPanel, AdminUsersPanel, type AdminSection } from './components/AdminPanel';
 import { AuthPage } from './components/AuthPage';
@@ -136,6 +138,11 @@ export function App() {
   const [databases, setDatabases] = useState<DatabaseSummary[]>([]);
   /** 表格名额（试用 / 基础 / 专业各自还能加几张）：侧边栏显示，登录与刷新列表时更新 */
   const [quota, setQuota] = useState<TableQuotaSet | null>(null);
+  /**
+   * 收款是否已开通（`GET /api/quota` 下发）：购买弹窗据此显示「微信扫码支付」还是「立即到账」。
+   * 会话接口不带这个信息，所以在第一次 `api.quota()` 返回前先当「没开通」（宁可少承诺）。
+   */
+  const [payment, setPayment] = useState<TableQuotaPayment | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [detail, setDetail] = useState<DatabaseDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -232,6 +239,8 @@ export function App() {
         setDatabases(payload.databases);
         // 会话里带着名额：侧边栏一进来就能显示「还能添加几个表格」
         setQuota(payload.quota);
+        // 收款状态不在会话里（第一次 api.quota() 会带上），先清掉上一个账号的值
+        setPayment(null);
         if (payload.user && payload.databases.length) {
           setActiveId((prev) =>
             prev && payload.databases.some((item) => item.id === prev) ? prev : payload.databases[0].id,
@@ -402,7 +411,11 @@ export function App() {
         api.quota().catch(() => null),
       ]);
       setDatabases(result.databases);
-      if (nextQuota) setQuota(nextQuota.quota);
+      if (nextQuota) {
+        setQuota(nextQuota.quota);
+        // 收款状态一起更新：管理员在后台填完 XorPay 密钥后，前端不用重新登录就能切到「扫码支付」
+        setPayment(nextQuota.payment);
+      }
     } catch {
       // the list refresh is best effort only
     }
@@ -423,21 +436,48 @@ export function App() {
       // 新建表格会占掉一个名额：顺手刷新侧边栏的「还能添加几个」
       void api
         .quota()
-        .then((next) => setQuota(next.quota))
+        .then((next) => {
+          setQuota(next.quota);
+          setPayment(next.payment);
+        })
         // 名额只是提示，拿不到就沿用上一次的数字
         .catch(() => undefined);
     },
     [narrow, toast],
   );
 
-  /** 购买表格名额：服务端算价（类型单价 × 数量 × 月数）并写一条购买流水，成功后刷新侧边栏的数字 */
-  const buyQuota = useCallback(
-    async ({ kind, count, months }: { kind: TableKind; count: number; months: number }) => {
-      const result = await api.purchaseQuota({ kind, count, months });
+  /**
+   * 下单买名额（说明弹窗里的「去支付 / 立即添加」）：
+   *   - 已开通收款：返回带支付二维码的响应（弹窗自己显示二维码 + 每 3 秒轮询查单）；
+   *   - 没开通收款：后端直接到账，这里顺手刷新名额并提示。
+   * 两种情况都先按服务端返回的权威名额刷新侧边栏数字。
+   */
+  const orderQuota = useCallback(
+    async (input: {
+      kind: TableKind;
+      count: number;
+      months: number;
+      payType: XorpayPayType;
+    }): Promise<QuotaOrderResponse> => {
+      const result = await api.createQuotaOrder(input);
       setQuota(result.quota);
-      toast(
-        `已购买 ${count} 个${tableKindLabel(kind)}名额（${purchaseMonthsLabel(months)}），现在可以添加了`,
-      );
+      // 下单响应里带着「收款是否已开通」，顺手矫正一下本地状态（管理员刚填完密钥的情况）
+      setPayment((prev) => (prev ? { ...prev, enabled: result.paymentEnabled } : prev));
+      if (result.purchase) {
+        toast(
+          `已购买 ${input.count} 个${tableKindLabel(input.kind)}名额（${purchaseMonthsLabel(input.months)}），现在可以添加了`,
+        );
+      }
+      return result;
+    },
+    [toast],
+  );
+
+  /** 支付到账（弹窗轮询到账后回调）：刷新名额并提示，弹窗那边会自己关闭 */
+  const handleQuotaPaid = useCallback(
+    (next: TableQuotaSet) => {
+      setQuota(next);
+      toast('支付成功，名额已到账');
     },
     [toast],
   );
@@ -555,7 +595,10 @@ export function App() {
         }}
         onInboxRefresh={() => void refreshInbox()}
         onInboxSelect={(message) => void openInboxMessage(message)}
-        onBuyQuota={buyQuota}
+        onOrderQuota={orderQuota}
+        onCheckQuotaOrder={(id) => api.quotaOrder(id)}
+        onQuotaPaid={handleQuotaPaid}
+        payment={payment}
       />
 
       {narrow && sidebarOpen ? (

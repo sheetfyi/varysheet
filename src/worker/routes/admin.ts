@@ -7,9 +7,11 @@
  *   POST   /api/admin/users/:id/password   重置某个用户的密码（可指定，也可随机生成）
  *   POST   /api/admin/users/delete         批量删除账号（用户管理第一列的复选框 → 「删除选中」）
  *   GET    /api/admin/settings             「站点设置」：站点名称 / 图标 / 管理员邮箱 / Resend 密钥与发件人
- *   PATCH  /api/admin/settings             保存上面的设置（Resend 密钥只回传掩码）
+ *                                            / XorPay 收款（appid + app secret，填好即刻开启微信扫码购买）
+ *   PATCH  /api/admin/settings             保存上面的设置（Resend / XorPay 密钥只回传掩码）
  *   POST   /api/admin/settings/icon        上传 / 替换站点图标（multipart，字段名 `file`）
  *   DELETE /api/admin/settings/icon        移除站点图标
+ *   POST   /api/admin/quota/grants         管理员赠额：给某个账号加表格名额（客服补偿 / 活动赠送）
  *   POST   /api/admin/maintenance/retention 立刻跑一次保留期清理（试用 / 基础表格，和定时任务同一套逻辑）
  *
  * 重置密码会让该用户在所有设备上立即下线，并尽力把新密码邮件通知给本人。
@@ -19,6 +21,7 @@
 import { hashPassword, requireAdmin, validatePasswordStrength } from '../auth';
 import { MAX_DELETE_USERS, deleteAdminUsers, loadAdminUser, loadAdminUsers } from '../admin';
 import { passwordResetEmail, sendEmail, shouldEchoCode } from '../email';
+import { grantQuota, parsePurchaseInput } from '../orders';
 import { purgeExpiredTableData } from '../retention';
 import {
   asString,
@@ -45,6 +48,7 @@ import {
   type SiteSettingsPatch,
 } from '../settings';
 import type { Route, RequestContext } from '../types';
+import { loadTableQuota } from './quota';
 
 /** 大小写字母 + 数字，去掉了容易看错的 I l 1 O 0 */
 const PASSWORD_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
@@ -171,14 +175,27 @@ async function deleteUsersHandler(ctx: RequestContext): Promise<Response> {
 /* --------------------------------------------------------------- 站点设置 */
 
 /**
- * 校验后台里粘贴的 Resend 密钥：去掉首尾空白，空串 = 清空（退回环境变量 / 不发信）。
- * 只挡明显有问题的输入（换行、空格、超长），真正的合法性交给 Resend 那边报错。
+ * 校验后台里粘贴的密钥（Resend / XorPay 通用）：去掉首尾空白，空串 = 清空（退回环境变量 / 关闭该功能）。
+ * 只挡明显有问题的输入（换行、空格、超长），真正的合法性交给各自的平台去报错。
  */
-function normalizeApiKey(value: unknown): string {
+function normalizeSecret(value: unknown, label: string): string {
   const raw = typeof value === 'string' ? value.trim() : '';
   if (!raw) return '';
-  if (/\s/.test(raw)) throw badRequest('Resend 密钥里不能有空格或换行');
-  if (raw.length > 200) throw badRequest('Resend 密钥太长，请检查是否复制多了');
+  if (/\s/.test(raw)) throw badRequest(`${label}里不能有空格或换行`);
+  if (raw.length > 200) throw badRequest(`${label}太长，请检查是否复制多了`);
+  return raw;
+}
+
+/**
+ * 校验 XorPay 的 appid（后台「应用配置」里那串）：只收字母 / 数字 / `-` / `_`。
+ * 空串 = 关掉收款（购买退回自助直通，见 src/worker/orders.ts）。
+ */
+function normalizeXorpayAid(value: unknown): string {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw) return '';
+  if (!/^[A-Za-z0-9_-]{2,64}$/.test(raw)) {
+    throw badRequest('XorPay 应用 ID 只支持字母 / 数字 / 连字符 / 下划线');
+  }
   return raw;
 }
 
@@ -196,7 +213,12 @@ async function updateSettingsHandler(ctx: RequestContext): Promise<Response> {
   if (body.siteName !== undefined) patch.siteName = asString(body.siteName, '站点名称', { required: true, max: 60 });
   if (body.adminEmail !== undefined) patch.adminEmail = normalizeAdminEmail(body.adminEmail);
   if (body.resendFromEmail !== undefined) patch.resendFromEmail = normalizeFromAddress(body.resendFromEmail);
-  if (body.resendApiKey !== undefined) patch.resendApiKey = normalizeApiKey(body.resendApiKey);
+  if (body.resendApiKey !== undefined) patch.resendApiKey = normalizeSecret(body.resendApiKey, 'Resend 密钥');
+  // XorPay 收款：填上 appid + app secret 就立刻开启「微信扫码购买」（不用重新部署）
+  if (body.xorpayAid !== undefined) patch.xorpayAid = normalizeXorpayAid(body.xorpayAid);
+  if (body.xorpayAppSecret !== undefined) {
+    patch.xorpayAppSecret = normalizeSecret(body.xorpayAppSecret, 'XorPay 密钥');
+  }
   if (!Object.keys(patch).length) throw badRequest('没有需要保存的修改');
 
   const settings = await saveSiteSettings(ctx.env, patch);
@@ -247,6 +269,34 @@ async function maintenanceRetentionHandler(ctx: RequestContext): Promise<Respons
   return json({ retention: await purgeExpiredTableData(ctx.env) });
 }
 
+/**
+ * 管理员赠额：给某个账号加表格名额，不产生订单、不走支付 —— 直接写一条 `channel = 'admin-grant'` 的流水。
+ *
+ * body `{ email, kind, count, months, note? }`：
+ *   - `kind` / `count` / `months` 的校验与用户下单共用（`parsePurchaseInput`），所以白名单一致；
+ *   - 金额按现价记（`purchaseAmountCents`），方便对账口径统一；
+ *   - 用于客服补偿 / 活动赠送；线上开通收款后，冒烟测试也靠它给测试账号发建表名额。
+ */
+async function grantQuotaHandler(ctx: RequestContext): Promise<Response> {
+  const admin = await requireAdmin(ctx.request, ctx.env);
+  const body = await readJson(ctx.request);
+  const email = normalizeEmail(body.email);
+  const input = parsePurchaseInput(body);
+  const target = await ctx.env.DB.prepare('SELECT id FROM users WHERE email = ?').bind(email).first<SqlRow>();
+  if (!target) throw notFound('用户不存在');
+
+  const userId = sqlString(target, 'id');
+  const purchase = await grantQuota(ctx.env, {
+    userId,
+    kind: input.kind,
+    count: input.count,
+    months: input.months,
+    note: input.note || `管理员赠额（${admin.email}）`,
+    createdBy: admin.id,
+  });
+  return json({ purchase, quota: await loadTableQuota(ctx.env, userId) }, { status: 201 });
+}
+
 export const adminRoutes: Route[] = [
   { method: 'GET', path: '/api/admin/users', handler: listUsersHandler },
   { method: 'PATCH', path: '/api/admin/users/:id', handler: updateUserHandler },
@@ -256,5 +306,6 @@ export const adminRoutes: Route[] = [
   { method: 'PATCH', path: '/api/admin/settings', handler: updateSettingsHandler },
   { method: 'POST', path: '/api/admin/settings/icon', handler: uploadSettingsIconHandler },
   { method: 'DELETE', path: '/api/admin/settings/icon', handler: deleteSettingsIconHandler },
+  { method: 'POST', path: '/api/admin/quota/grants', handler: grantQuotaHandler },
   { method: 'POST', path: '/api/admin/maintenance/retention', handler: maintenanceRetentionHandler },
 ];

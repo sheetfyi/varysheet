@@ -23,8 +23,9 @@
     "db:sync-ids": "node scripts/sync-d1-ids.mjs",
     "typecheck": "tsc -p tsconfig.client.json --noEmit && tsc -p tsconfig.worker.json --noEmit",
     "check:routes": "node scripts/check-routes.mjs",
-    "check:scripts": "node --check scripts/sync-d1-ids.mjs && node --check scripts/sync-shard-schema.mjs && node --check scripts/migrate-split-data.mjs && node --check scripts/check-routes.mjs && node --check scripts/smoke-test.mjs",
+    "check:scripts": "node --check scripts/sync-d1-ids.mjs && node --check scripts/sync-shard-schema.mjs && node --check scripts/migrate-split-data.mjs && node --check scripts/check-routes.mjs && node --check scripts/smoke-test.mjs && node --check scripts/fake-xorpay.mjs",
     "cf-typegen": "wrangler types",
+    "fake:xorpay": "node scripts/fake-xorpay.mjs",
     "test:e2e": "node scripts/smoke-test.mjs"
   },
   "dependencies": {

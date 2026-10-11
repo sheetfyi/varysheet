@@ -9,43 +9,25 @@
  *   - 已购买 = `table_purchases` 里这一类型的 count 之和（试用表格不卖，恒为 0）；
  *   - 默认名额：试用 1（新注册就送一张免费试用表）、基础 / 专业 0。
  *
- * 购买走 `POST /api/quota/purchases`（body `{ kind, count, months }`）：`months` 是**总时长**
- * （时长单位「月」× 数量 1 ~ 12，或时长单位「年」× 数量 1 ~ 5 → 1 ~ 60 个月，
- * 见 shared/tableKind.ts 的 `purchaseMonthsOf` / `isPurchasableMonths`），金额按「每月单价 × 数量 × 总月数」算
- * （基础 9.9 元/月、专业 99.9 元/月），写一条流水并**立刻**生效 —— 买几个就多几个可添加
- * 的表格。支付网关还没接入，渠道先记 `self-serve`，
- * 见 migrations/control/0015_table_purchase_pricing.sql 的说明。
+ * 购买走订单（见 `src/worker/orders.ts` 与 docs/payment-xorpay.md）：
+ *   - `POST /api/quota/orders`（推荐，前端在用）：body `{ kind, count, months, payType? }` →
+ *     开通了收款就返回微信支付二维码（202 + `pay.qr`），等回调 / 查单确认后才加名额；
+ *     没开通收款（后台「站点设置」里没填 XorPay appid / secret）则立刻到账（201 + `purchase`）；
+ *   - `POST /api/quota/purchases`（老接口，保留兼容）：同一套逻辑的简写，响应结构一并保留。
+ *
+ * `months` 是**总时长**（时长单位「月」× 数量 1 ~ 12，或时长单位「年」× 数量 1 ~ 5 → 1 ~ 60 个月，
+ * 见 shared/tableKind.ts 的 `purchaseMonthsOf` / `isPurchasableMonths`），
+ * 金额按「每月单价 × 数量 × 总月数」算（基础 9.9 元/月、专业 99.9 元/月），服务端算价、客户端不作数。
  */
-import { MAX_PURCHASE_COUNT, tableQuotaSetOf } from '../../shared/quota';
-import {
-  BUYABLE_TABLE_KINDS,
-  MAX_PURCHASE_MONTHS,
-  MIN_PURCHASE_MONTHS,
-  isPurchasableMonths,
-  purchaseAmountCents,
-} from '../../shared/tableKind';
-import type { TableKind, TablePurchase, TableQuotaSet } from '../../shared/types';
+import { tableQuotaSetOf } from '../../shared/quota';
+import type { TableQuotaSet } from '../../shared/types';
 import { requireUser } from '../auth';
-import {
-  asEnum,
-  asNumberValue,
-  asString,
-  badRequest,
-  json,
-  newId,
-  readJson,
-  sqlNumber,
-  type SqlRow,
-} from '../http';
+import { json, readJson, sqlNumber, type SqlRow } from '../http';
+import { createOrderForUser, loadXorpayConfig, parsePurchaseInput } from '../orders';
+import { xorpayConfigured } from '../xorpay';
 import type { Env, RequestContext, Route } from '../types';
 import { forEachShardSafe } from '../shards';
 import { countInviteTrialGrants } from '../trialGrants';
-
-/**
- * 一次购买只认「可以买的类型」（试用表格是免费送的不卖，见 shared/tableKind.ts）：
- * 写库前先卡住，库里不会出现第三种值。
- */
-const PURCHASE_KINDS = BUYABLE_TABLE_KINDS;
 
 /**
  * 分片里的名额统计列：`used_*` = 自己拥有的、未归档的这一类型表格数。
@@ -126,68 +108,40 @@ export async function loadTableQuota(env: Env, userId: string): Promise<TableQuo
 
 async function quotaHandler(ctx: RequestContext): Promise<Response> {
   const user = await requireUser(ctx.request, ctx.env);
-  return json({ quota: await loadTableQuota(ctx.env, user.id) });
+  const config = await loadXorpayConfig(ctx.env);
+  return json({
+    quota: await loadTableQuota(ctx.env, user.id),
+    // 购买弹窗据此决定显示「微信扫码支付」还是「下单立即到账」（见 shared/types.ts 的 TableQuotaPayment）
+    payment: { enabled: xorpayConfigured(config), methods: config.payTypes },
+  });
 }
 
 /**
- * 购买表格名额：写一条购买流水 + 立刻加名额，响应里带上最新的完整名额。
+ * 老接口：`POST /api/quota/purchases`（body `{ kind, count, months, note? }`）。
  *
- * body `{ kind, count, months }`：`months` 是**总购买时长**（时长单位「月」→ 数量 1 ~ 12 个月，
- * 时长单位「年」→ 数量 1 ~ 5 年即 12 / 24 / 36 / 48 / 60 个月，见 shared/tableKind.ts 的
- * `purchaseMonthsOf` / `isPurchasableMonths`），金额由服务端按「每月单价 × 数量 × 月数」
- * 算好写进流水（客户端传什么价都不作数）。支付还没接入，所以现在没有「支付凭证」这一步，
- * `channel` 记 `self-serve`。
+ * 接入支付之后它只是「下单」的简写，行为取决于有没有开通收款：
+ *   - **没开通**（本地 / CI / 还在等 XorPay 审核）：与接入前逐字节一样 —— 立刻写流水、立刻加名额，
+ *     返回 201 `{ quota, purchase }`；
+ *   - **开通了**：返回 202 `{ quota, order, pay }`（`pay.qr` 是微信支付二维码），名额要等回调 /
+ *     查单确认后才到账。前端已改走 `POST /api/quota/orders`，这里留着兼容老客户端与冒烟测试。
  */
 async function purchaseHandler(ctx: RequestContext): Promise<Response> {
   const user = await requireUser(ctx.request, ctx.env);
   const body = await readJson(ctx.request);
-
-  const kind: TableKind = asEnum(body.kind ?? 'basic', PURCHASE_KINDS, '表格类型');
-  const count = Math.floor(asNumberValue(body.count ?? 1, '购买数量'));
-  if (count < 1) throw badRequest('购买数量至少 1 个');
-  if (count > MAX_PURCHASE_COUNT) throw badRequest(`一次最多购买 ${MAX_PURCHASE_COUNT} 个名额`);
-  // 购买时长 = 时长单位（月 1 个月 / 年 12 个月）× 时长数量（月 1 ~ 12 个、年 1 ~ 5 个）：
-  // 服务端只认这个白名单里的总月数（1 ~ 12 个月，或 12 / 24 / 36 / 48 / 60 个月）
-  const months = Math.floor(asNumberValue(body.months ?? 1, '购买时长'));
-  if (!isPurchasableMonths(months)) {
-    throw badRequest(
-      `购买时长只能选 ${MIN_PURCHASE_MONTHS} ~ 12 个月（时长单位「月」× 时长数量 1 ~ 12），或 12 / 24 / 36 / 48 / ${MAX_PURCHASE_MONTHS} 个月（时长单位「年」× 时长数量 1 ~ 5）`,
-    );
-  }
-  const note = asString(body.note, '备注', { max: 200 });
-
-  const purchase: TablePurchase = {
-    id: newId(),
-    userId: user.id,
-    kind,
-    count,
-    months,
-    amountCents: purchaseAmountCents(kind, count, months),
-    channel: 'self-serve',
-    note,
-    createdAt: Date.now(),
-  };
-
-  await ctx.env.DB.prepare(
-    `INSERT INTO table_purchases
-       (id, user_id, kind, count, months, amount_cents, channel, note, created_by, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  )
-    .bind(
-      purchase.id,
-      purchase.userId,
-      purchase.kind,
-      purchase.count,
-      purchase.months,
-      purchase.amountCents,
-      purchase.channel,
-      purchase.note,
-      user.id,
-      purchase.createdAt,
-    )
-    .run();
-
-  return json({ quota: await loadTableQuota(ctx.env, user.id), purchase }, { status: 201 });
+  const input = parsePurchaseInput(body);
+  const created = await createOrderForUser(ctx.env, user, input, {
+    request: ctx.request,
+    payType: body.payType,
+  });
+  return json(
+    {
+      quota: await loadTableQuota(ctx.env, user.id),
+      purchase: created.purchase,
+      order: created.order,
+      pay: created.pay,
+    },
+    { status: created.purchase ? 201 : 202 },
+  );
 }
 
 export const quotaRoutes: Route[] = [

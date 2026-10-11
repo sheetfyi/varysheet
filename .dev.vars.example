@@ -46,3 +46,22 @@ MAX_DATABASE_STORAGE_MB=1024
 # 本地想验证清理逻辑，可以把它调成 0 以外的极小值（例如 1）配合手动改数据，
 # 或者直接调管理员接口 POST /api/admin/maintenance/retention 手动跑一次。
 BASIC_TABLE_RETENTION_DAYS=365
+
+# ---- XorPay 收款（表格名额购买）------------------------------------------
+# 正式配置推荐直接填在「后台 → 站点设置」里（存 D1，保存完立刻生效，不用重新部署）：
+#   XorPay 应用 ID（appid）+ 应用密钥（app secret），在 XorPay 后台「应用配置」里；
+#   填好之后，侧边栏的购买弹窗就会显示微信支付二维码。
+# 下面这两个环境变量是**兜底**（两边都没有时购买走「自助直通」：下单即到账、不真的收钱），
+# 本地开发想走完整的支付链路就配上它们 + 假网关：
+#   终端 A：npm run fake:xorpay
+#   终端 B：npm run dev
+#   模拟付款：curl.exe -X POST http://127.0.0.1:8788/__pay/<订单号>
+XORPAY_AID=
+XORPAY_APP_SECRET=
+# 接口基址：指向本地假网关（见 scripts/fake-xorpay.mjs）；留空 = 官方 https://xorpay.com
+XORPAY_API_BASE=http://127.0.0.1:8788
+# 开放的支付方式，逗号分隔。默认只有 native（微信扫码）；XorPay 开通支付宝后写 alipay 或 native,alipay
+XORPAY_PAY_TYPES=native
+# 回调地址用的公网基址（本地不用配，就取当前请求的 origin）。线上配成绑定的自定义域名，
+# 例如 PUBLIC_BASE_URL=https://varysheet.example.com —— 回调打不进来会「付了钱不到账」。
+PUBLIC_BASE_URL=

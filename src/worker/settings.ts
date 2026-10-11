@@ -1,17 +1,22 @@
 /**
- * 站点设置：管理员在「后台 → 站点设置」里改的站点名称、站点图标、Resend 发信密钥与发件人。
+ * 站点设置：管理员在「后台 → 站点设置」里改的站点名称、站点图标、Resend 发信密钥与发件人、
+ * XorPay 收款（表格名额购买）。
  *
- * 存在 D1 的 `settings` 表里（见 migrations/0010_site_settings.sql），读取顺序是
+ * 存在 D1 的 `settings` 表里（见 migrations/control/0010_site_settings.sql），读取顺序是
  * **数据库里的值 → 环境变量 / secret → 代码默认值**：
- *   - `site_name`        → `APP_NAME`          → `Varysheet`
- *   - `admin_email`      → `ADMIN_EMAIL`       → `admin@varysheet.com`
- *   - `resend_api_key`   → `RESEND_API_KEY`    → 空（不发信，确认码走回显）
- *   - `resend_from_email`→ `RESEND_FROM_EMAIL` → `Varysheet <admin@varysheet.com>`
+ *   - `site_name`         → `APP_NAME`            → `Varysheet`
+ *   - `admin_email`       → `ADMIN_EMAIL`         → `admin@varysheet.com`
+ *   - `resend_api_key`    → `RESEND_API_KEY`      → 空（不发信，确认码走回显）
+ *   - `resend_from_email` → `RESEND_FROM_EMAIL`   → `Varysheet <admin@varysheet.com>`
+ *   - `xorpay_aid`        → `XORPAY_AID`          → 空（不收款，购买走自助直通）
+ *   - `xorpay_app_secret` → `XORPAY_APP_SECRET`   → 空
  *
  * 这样升级前用 `wrangler secret` / `.dev.vars` 配好的老部署不用改；管理员想改也在后台直接改，
- * 不用重新部署。图标本体存在 R2 的固定键 `site/branding-icon`，靠 `?v=<updated_at>` 破缓存。
+ * 不用重新部署（XorPay 的收款信息尤其方便：审核下来之后填进后台就立刻能收款）。
+ * 图标本体存在 R2 的固定键 `site/branding-icon`，靠 `?v=<updated_at>` 破缓存。
  */
 import type { AdminSettings, BrandingResponse } from '../shared/types';
+import { enabledPayTypes } from './xorpay';
 import { EMAIL_PATTERN, badRequest, sqlNumber, sqlString, type SqlRow } from './http';
 import type { Env } from './types';
 
@@ -44,6 +49,9 @@ const KEY_ICON_MIME = 'site_icon_mime';
 const KEY_ICON_UPDATED_AT = 'site_icon_updated_at';
 const KEY_RESEND_API_KEY = 'resend_api_key';
 const KEY_RESEND_FROM = 'resend_from_email';
+/** XorPay 收款（表格名额购买）：后台填了这两个就自动开启下单 */
+const KEY_XORPAY_AID = 'xorpay_aid';
+const KEY_XORPAY_APP_SECRET = 'xorpay_app_secret';
 
 export interface SiteSettings {
   siteName: string;
@@ -58,6 +66,10 @@ export interface SiteSettings {
   resendApiKey: string;
   /** 生效中的发件人 */
   resendFromEmail: string;
+  /** 生效中的 XorPay appid（没有就是空字符串 = 不开收款，购买走自助直通） */
+  xorpayAid: string;
+  /** 生效中的 XorPay app secret */
+  xorpayAppSecret: string;
   /** `settings` 表里最后修改时间（0 = 表里什么都没有） */
   updatedAt: number;
 }
@@ -90,6 +102,9 @@ export async function loadSiteSettings(env: Env): Promise<SiteSettings> {
     iconMime: text(values.get(KEY_ICON_MIME)) || 'image/png',
     resendApiKey: text(values.get(KEY_RESEND_API_KEY)) || text(env.RESEND_API_KEY),
     resendFromEmail: text(values.get(KEY_RESEND_FROM)) || text(env.RESEND_FROM_EMAIL) || DEFAULT_FROM_EMAIL,
+    // XorPay 收款：后台填的优先，环境变量 / secret 兜底（本地开发与 CI 用后者）
+    xorpayAid: text(values.get(KEY_XORPAY_AID)) || text(env.XORPAY_AID),
+    xorpayAppSecret: text(values.get(KEY_XORPAY_APP_SECRET)) || text(env.XORPAY_APP_SECRET),
     updatedAt,
   };
 }
@@ -119,6 +134,7 @@ export type AdminSettingsPayload = AdminSettings;
 export async function adminSettingsPayload(env: Env): Promise<AdminSettingsPayload> {
   const settings = await loadSiteSettings(env);
   const envKey = text(env.RESEND_API_KEY);
+  const envXorpaySecret = text(env.XORPAY_APP_SECRET);
   return {
     siteName: settings.siteName,
     iconUrl: siteIconUrl(settings),
@@ -129,6 +145,13 @@ export async function adminSettingsPayload(env: Env): Promise<AdminSettingsPaylo
     resendApiKeyConfigured: settings.resendApiKey !== '',
     resendApiKeyFromEnv: settings.resendApiKey !== '' && settings.resendApiKey === envKey,
     resendFromEmail: settings.resendFromEmail,
+    // XorPay 收款：后台填好 appid + app secret 就立刻生效（不用重新部署）
+    xorpayAid: settings.xorpayAid,
+    resolvedXorpayAppSecret: maskSecret(settings.xorpayAppSecret),
+    xorpayConfigured: settings.xorpayAid !== '' && settings.xorpayAppSecret !== '',
+    xorpayAppSecretFromEnv:
+      settings.xorpayAppSecret !== '' && settings.xorpayAppSecret === envXorpaySecret,
+    xorpayPayTypes: enabledPayTypes(env),
     defaults: { siteName: DEFAULT_SITE_NAME, adminEmail: DEFAULT_ADMIN_EMAIL, resendFromEmail: DEFAULT_FROM_EMAIL },
     updatedAt: settings.updatedAt,
   };
@@ -141,6 +164,10 @@ export interface SiteSettingsPatch {
   /** 传空字符串 = 清掉数据库里的值，退回 Worker secret / 默认值 */
   resendApiKey?: string;
   resendFromEmail?: string;
+  /** XorPay appid；留空保存 = 关掉收款（购买退回自助直通） */
+  xorpayAid?: string;
+  /** XorPay app secret；留空保存 = 关掉收款 */
+  xorpayAppSecret?: string;
 }
 
 function upsert(env: Env, key: string, value: string, now: number): D1PreparedStatement {
@@ -158,6 +185,10 @@ export async function saveSiteSettings(env: Env, patch: SiteSettingsPatch): Prom
   if (patch.adminEmail !== undefined) statements.push(upsert(env, KEY_ADMIN_EMAIL, patch.adminEmail, now));
   if (patch.resendApiKey !== undefined) statements.push(upsert(env, KEY_RESEND_API_KEY, patch.resendApiKey, now));
   if (patch.resendFromEmail !== undefined) statements.push(upsert(env, KEY_RESEND_FROM, patch.resendFromEmail, now));
+  if (patch.xorpayAid !== undefined) statements.push(upsert(env, KEY_XORPAY_AID, patch.xorpayAid, now));
+  if (patch.xorpayAppSecret !== undefined) {
+    statements.push(upsert(env, KEY_XORPAY_APP_SECRET, patch.xorpayAppSecret, now));
+  }
   if (statements.length) await env.DB.batch(statements);
   return loadSiteSettings(env);
 }

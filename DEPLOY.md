@@ -320,6 +320,43 @@ $env:GCM_INTERACTIVE='0'; git -c credential.interactive=false ls-remote origin H
 
 凭据真过期时，去掉这两个环境变量手动 push 一次、按提示重新授权即可（账号仍是 `sheetfyi`）。
 
+### 6.8 收款（XorPay，表格名额购买）
+
+在后台填好收款信息就能收款，**不需要重新部署**：
+
+1. 到 [XorPay](https://xorpay.com) 注册并开通（支持个人；开通费 ¥100；微信 / 支付宝任一渠道进件成功即算开通），
+   在后台「应用配置」里拿到 **appid** 与 **app secret**；
+2. 登录本站 → 侧边栏底部「系统管理」→「站点设置」→ 填 **XorPay 应用 ID（appid）** 与 **应用密钥（app secret）** → 保存设置。
+   保存成功会提示「站点设置已保存：微信扫码收款已开启」；
+3. 回侧边栏点「你有 N 个表格可」的数字 → 选好类型 / 时长 / 数量 → 点「去支付（微信扫码）」：
+   应该出现微信支付二维码；扫码付款后 ≤3 秒名额自动到账（弹窗自己关闭，侧边栏数字 +N）。
+
+要点与排障：
+
+- **默认只开微信扫码**（`native`）。XorPay 那边也开通支付宝之后，用环境变量 `XORPAY_PAY_TYPES=alipay`
+  （或 `native,alipay`）就能打开支付宝当面付 —— 代码路径已经就绪，不用改代码。
+- **回调地址**是 `{站点域名}/api/xorpay/notify`（下单时写进 XorPay 订单）。回调由 XorPay 的服务器
+  （国内）主动打进来，`*.workers.dev` 在国内不稳 —— 建议绑一个自定义域名并把 `PUBLIC_BASE_URL`
+  配成它，否则可能「付了钱不到账」（前端轮询会主动查单兜底，但别指望它）。
+- 单笔金额上限 **¥1000**（取支付宝当面付个人单笔限额当统一口径），超了会在下单前提示拆单。
+- 对账 / 人工处理（在用户库里执行）：
+
+  ```sql
+  -- 最近 20 单
+  SELECT id, user_id, kind, count, months, amount_cents, paid_cents, status, pay_type,
+         aoid, transaction_id, buyer, created_at, paid_at
+    FROM table_orders ORDER BY created_at DESC LIMIT 20;
+  -- 需要人工处理：实付与订单金额不一致
+  SELECT * FROM table_orders WHERE status = 'amount_mismatch';
+  ```
+
+- 想给某个账号补名额（客服补偿 / 活动赠送，也是线上冒烟测试发名额用的接口）：
+  `POST /api/admin/quota/grants`，body `{ email, kind, count, months, note? }`（管理员会话）。
+- 本地想走完整支付链路（不花真钱）：`npm run fake:xorpay` + `.dev.vars` 里的
+  `XORPAY_API_BASE=http://127.0.0.1:8788`，然后 `curl.exe -X POST http://127.0.0.1:8788/__pay/<订单号>`
+  模拟付款。完整方案（字段口径、签名、验签、幂等、限额、风险清单）见
+  [docs/payment-xorpay.md](./docs/payment-xorpay.md)。
+
 ## 7. 常见问题
 
 | 现象 | 处理 |

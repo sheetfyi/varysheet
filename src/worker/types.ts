@@ -51,6 +51,24 @@ export interface Env {
   RESEND_API_KEY?: string;
   /** 发件人，例如 `Varysheet <admin@varysheet.com>`；也可以在「后台 → 站点设置」里改（那边优先） */
   RESEND_FROM_EMAIL?: string;
+  /**
+   * XorPay 收款（https://xorpay.com）的**兜底**配置。推荐直接填在「后台 → 站点设置」里：
+   * 存数据库、保存完立刻生效、不用重新部署。这里的 secret 适合本地开发与 CI。
+   * 两边都没有时购买走「自助直通」（下单即到账，不产生真实收款）。
+   */
+  XORPAY_AID?: string;
+  /** XorPay 的 app secret（secret）：下单签名与回调验签都用它 */
+  XORPAY_APP_SECRET?: string;
+  /** XorPay 接口基址，默认 https://xorpay.com；本地联调指向 scripts/fake-xorpay.mjs */
+  XORPAY_API_BASE?: string;
+  /** 开放的支付方式，逗号分隔（默认只有 `native` = 微信扫码；要开支付宝写 `alipay` 或 `native,alipay`） */
+  XORPAY_PAY_TYPES?: string;
+  /**
+   * 生成 XorPay 回调地址（notify_url）用的公网基址，例如 https://varysheet.com。
+   * 不配就用请求的 origin —— 线上建议配成绑定的自定义域名（`*.workers.dev` 在国内不稳，
+   * 回调打不进来就会「付了钱不到账」，详见 DEPLOY.md）。
+   */
+  PUBLIC_BASE_URL?: string;
   /** 超级管理员的登录邮箱：登录时会被自动创建 / 提升为管理员；兜底值可在「后台 → 站点设置」里改 */
   ADMIN_EMAIL?: string;
   /** 超级管理员初始密码（只用于「首次创建账号」；已存在时不会覆盖，除非 ADMIN_RESET_PASSWORD=true） */
