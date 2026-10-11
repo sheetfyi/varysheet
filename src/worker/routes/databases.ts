@@ -46,7 +46,7 @@ import {
 } from '../http';
 import { deliverViewInvite, issueViewInvite } from '../invites';
 import { loadTableQuota } from './quota';
-import { allocateSlot, loadSlotAllocations, recordSlotConsumption } from '../slots';
+import { allocateSlot, latestPurchaseExpiry, loadSlotAllocations, recordSlotConsumption } from '../slots';
 import {
   databaseSummaryFromRow,
   memberFromRow,
@@ -136,6 +136,12 @@ export async function listDatabases(env: Env, userId: string): Promise<DatabaseS
   }
   // 表格的到期时间（续费窗口）也在用户库：一次读全自己在基础 / 专业分片上的表的时长
   const slotExpiresAt = await loadSlotAllocations(env, userId);
+  // 迁移（0017）之前建的老表格没有时长记录：退回「该类型最近一笔购买的到期时间」，
+  // 这样它们进入最后一周时同样会显示「续费」（真正续费时 resolveRenewTarget() 会现场补一条记录）
+  const fallbackExpiry = {
+    basic: await latestPurchaseExpiry(env, userId, 'basic'),
+    pro: await latestPurchaseExpiry(env, userId, 'pro'),
+  };
 
   return rows.map((row) => {
     const role = sqlString(row, 'role', 'viewer') as Role;
@@ -153,7 +159,10 @@ export async function listDatabases(env: Env, userId: string): Promise<DatabaseS
       capacityFromUsage(usageFromRow(row), capacityLimits(env, kind)),
     );
     // 只有自己拥有的基础 / 专业表格才有时长（续费窗口）：数据在用户库，这里在 JS 里合并
-    if (role === 'owner' && kind !== 'trial') summary.slotExpiresAt = slotExpiresAt.get(summary.id) ?? 0;
+    if (role === 'owner' && kind !== 'trial') {
+      summary.slotExpiresAt =
+        slotExpiresAt.get(summary.id) ?? (kind === 'pro' ? fallbackExpiry.pro : fallbackExpiry.basic);
+    }
     return summary;
   });
 }

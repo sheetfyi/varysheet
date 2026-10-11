@@ -56,7 +56,9 @@ export async function countConsumedSlots(env: Env, userId: string): Promise<{ ba
   return { basic: sqlNumber(row ?? {}, 'basic'), pro: sqlNumber(row ?? {}, 'pro') };
 }
 
-/** 该类型最近一次「新增名额」的购买时长（月）：建表时按它起算，没买过就按 1 个月 */
+/**
+ * 该类型最近一次「新增名额」的购买时长（月）：建表时按它起算，没买过就按 1 个月。
+ */
 export async function latestPurchaseMonths(env: Env, userId: string, kind: TableKind | string): Promise<number> {
   const row = await env.DB.prepare(
     `SELECT months FROM table_purchases
@@ -67,6 +69,29 @@ export async function latestPurchaseMonths(env: Env, userId: string, kind: Table
     .first<SqlRow>();
   const months = sqlNumber(row ?? {}, 'months', 1);
   return months > 0 ? months : 1;
+}
+
+/**
+ * 老表格（迁移 0017 之前建的，没有 `table_slot_allocations` 行）的兜底到期时间：
+ * 按该类型**最近一笔**「新增名额」购买算 `created_at + months`；没买过就返回 0（不显示「续费」）。
+ *
+ * 只用来决定清单里要不要显示「续费」；真正续费时 `resolveRenewTarget()` 会现场补一条时长记录。
+ */
+export async function latestPurchaseExpiry(
+  env: Env,
+  userId: string,
+  kind: TableKind | string,
+): Promise<number> {
+  const row = await env.DB.prepare(
+    `SELECT created_at, months FROM table_purchases
+      WHERE user_id = ? AND kind = ? AND database_id = ''
+      ORDER BY created_at DESC, id DESC LIMIT 1`,
+  )
+    .bind(userId, asTableKind(kind))
+    .first<SqlRow>();
+  if (!row) return 0;
+  const months = sqlNumber(row, 'months', 1);
+  return addMonths(sqlNumber(row, 'created_at'), months > 0 ? months : 1);
 }
 
 /**
@@ -100,7 +125,10 @@ export async function allocateSlot(
   return stored ? sqlNumber(stored, 'expires_at') : expiresAt;
 }
 
-/** 一次读全这个账号所有表格的到期时间：`databaseId → expiresAt`（表格列表用它填 `slotExpiresAt`） */
+/**
+ * 一次读全这个账号所有表格的到期时间：`databaseId → expiresAt`（表格列表用它填 `slotExpiresAt`）。
+ * 迁移（0017）之前建的老表格没有记录，调用方再用 `latestPurchaseExpiry()` 兜底。
+ */
 export async function loadSlotAllocations(env: Env, userId: string): Promise<Map<string, number>> {
   const { results } = await env.DB.prepare(
     'SELECT database_id, expires_at FROM table_slot_allocations WHERE user_id = ?',

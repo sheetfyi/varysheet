@@ -2249,6 +2249,10 @@ npx wrangler secret delete XORPAY_APP_SECRET
 没开通收款（本地 / CI）时同样是「下单即到账」：自助直通分支写完流水就顺手 `renewSlot()`，
 两种模式下续费的行为一致。表结构见 `migrations/control/0017_slot_renewals.sql`。
 
+> 迁移之前建的老表格没有 `table_slot_allocations` 行：列表里按**该类型最近一笔购买的到期时间**
+> 兜底（`latestPurchaseExpiry()`），所以它们进入最后一周时同样会显示「续费」；
+> 真正下这一单时 `resolveRenewTarget()` 会现场补一条时长记录，之后的续费就走 `expires_at` 了。
+
 > 同一次改动也把「删表与名额」的关系定死了：**基础 / 专业表格被删掉后名额不退还**
 > （`table_slot_consumptions` 记一笔，`GET /api/quota` 的「已用」把它算进去，已付的钱也不退），
 > 试用表格保持原样（删掉就把名额还回来）。
