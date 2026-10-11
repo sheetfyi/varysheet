@@ -15,6 +15,7 @@ import {
 } from '../../shared/capacity';
 import {
   MAX_PURCHASE_COUNT,
+  SHARE_TABLE_QUOTA,
   quotaSetFromUsed,
   TABLE_QUOTA_RULES,
   tableQuotaHasRoom,
@@ -23,11 +24,13 @@ import {
 } from '../../shared/quota';
 import {
   BUYABLE_TABLE_KINDS,
+  PURCHASE_MONTHS,
   TABLE_KIND_FEATURES,
   TABLE_KINDS,
   asTableKind,
+  purchaseMonthsLabel,
+  purchasePriceText,
   tableKindCapacityText,
-  tableKindLabel,
   tableKindMeta,
 } from '../../shared/tableKind';
 import type {
@@ -36,10 +39,10 @@ import type {
   InboxMessage,
   SessionUser,
   TableKind,
-  TableQuota,
   TableQuotaSet,
 } from '../../shared/types';
 import { ApiError } from '../api';
+import type { AdminSection } from './AdminPanel';
 import { InboxButton } from './InboxButton';
 import { Modal } from './Modal';
 import { SiteMark } from './SiteMark';
@@ -69,16 +72,16 @@ interface SidebarProps {
   onLogout: () => void;
   /** 打开「修改密码」弹窗 */
   onChangePassword: () => void;
-  /** 当前主区域是不是「用户管理」（管理员才有） */
-  adminView: boolean;
-  /** 打开用户管理（仅 `user.isAdmin` 时入口可见） */
-  onOpenAdmin: () => void;
+  /** 当前主区域停在后台的哪一页：'users' 用户管理 / 'system' 系统管理 / null 表格页（管理员才有） */
+  adminView: AdminSection | null;
+  /** 打开后台的某一页（用户管理 / 系统管理，仅 `user.isAdmin` 时入口可见） */
+  onOpenAdmin: (section: AdminSection) => void;
   /** 展开收件箱前刷新一次 */
   onInboxRefresh: () => void;
   /** 点开一条私信：已读 + 打开记录卡片并定位到那条备注 */
   onInboxSelect: (message: InboxMessage) => void;
   /** 购买表格名额（说明弹窗里的「购买」）：由 App 调接口、刷新名额并弹提示 */
-  onBuyQuota: (input: { kind: TableKind; count: number }) => Promise<void>;
+  onBuyQuota: (input: { kind: TableKind; count: number; months: number }) => Promise<void>;
 }
 
 /** 容量浮层的宽度（与侧边栏同宽；窄屏按视口夹取，不会横向溢出） */
@@ -242,29 +245,42 @@ function CapacityPanel({
 }
 
 /**
- * 侧边栏里每张表的容量入口：一个硬盘图标（💾）。
+ * 列表里的「试用 / 基础 / 专业」徽标：同时也是这张表的**容量入口**。
  *
- * 容量富余时就是个普通图标；记录 / 附件任一维度用掉 80% 起底色转浅黄、
- * 到上限转浅红，并在行尾再挂一个「已满」标签，具体用到多少在浮层里看。
- * 点一下弹出容量明细（见 `CapacityPanel`），悬停仍是 `title` 里的一行提示。
+ * 按需求去掉了行尾的硬盘图标（💾），改由徽标承担：点一下弹出容量明细
+ * （见 `CapacityPanel`），悬停仍是 `title` 里的一行提示。容量富余时就是普通徽标；
+ * 记录 / 附件任一维度用掉 80% 起底色转浅黄、到上限转浅红，并在行尾再挂一个
+ * 「已满」标签，具体用到多少在浮层里看。
+ *
  * 这里只负责显示，拦增长由服务端（403 `capacity_exceeded`）和表格页负责。
  */
-function CapacityMeter({
+function KindCapacityTag({
   name,
+  kind,
   capacity,
 }: {
   name: string;
+  kind: TableKind;
+  /** 老标签页里可能是升级前拉到的旧会话数据（没有 capacity 字段），此时退回不可点的纯徽标 */
   capacity?: DatabaseCapacity;
 }) {
   // 浮层锚点：存元素本身，滚动时按它的实时位置重算（hook 得放在下面的提前 return 之前）
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   const close = useCallback(() => setAnchor(null), []);
-  // 老标签页里可能是升级前拉到的旧会话数据（没有 capacity 字段），别让它把侧边栏搞崩
-  if (!capacity) return null;
-  // 图标底色按「更紧张的那一侧」判档：记录或附件任一维度吃紧都要能看出来
+  const meta = tableKindMeta(kind);
+
+  if (!capacity) {
+    return (
+      <span className={`kind-tag ${kind}`} title={tableKindCapacityText(kind)}>
+        {meta.shortLabel}
+      </span>
+    );
+  }
+
+  // 徽标底色按「更紧张的那一侧」判档：记录或附件任一维度吃紧都要能看出来
   const level = capacityLevelOfRatio(capacityRatio(capacity));
 
-  /** 点 / 回车图标：展开明细，再点一次收起（拦掉冒泡，别顺带切换表格） */
+  /** 点 / 回车徽标：展开明细，再点一次收起（拦掉冒泡，别顺带切换表格） */
   const toggle = (event: React.SyntheticEvent<HTMLElement>) => {
     event.preventDefault();
     event.stopPropagation();
@@ -274,22 +290,19 @@ function CapacityMeter({
   return (
     <>
       <span
-        className={`capacity-meter ${level}${anchor ? ' open' : ''}`}
+        className={`kind-tag ${kind} capacity-entry ${level}${anchor ? ' open' : ''}`}
         role="button"
         tabIndex={0}
         aria-haspopup="dialog"
         aria-expanded={anchor !== null}
-        aria-label={`容量：${capacityUsageSummary(capacity)}，点开查看明细`}
+        aria-label={`${meta.label}容量：${capacityUsageSummary(capacity)}，点开查看明细`}
         title={capacityTooltip(capacity)}
         onClick={toggle}
         onKeyDown={(event) => {
           if (event.key === 'Enter' || event.key === ' ') toggle(event);
         }}
       >
-        {/* 硬盘图标：富余 / 快满 / 已满 靠底色区分，用到多少在浮层与 title 里看 */}
-        <span className="capacity-disk" aria-hidden="true">
-          💾
-        </span>
+        {meta.shortLabel}
       </span>
       {capacity.atCapacity ? <span className="capacity-full-tag">已满</span> : null}
       {anchor ? (
@@ -300,8 +313,9 @@ function CapacityMeter({
 }
 
 /**
- * 「表格数量说明」弹窗：讲清名额规则（三类分开算、每分享一次 +1、邀请新用户 +1、可以购买）
- * + 购买入口，外加一张「试用表格 / 基础表格 / 专业表格的功能区别」对比表。
+ * 「表格数量说明」弹窗：讲清名额规则（三类分开算、试用靠邀请新用户 +1、基础只能购买、
+ * 专业每分享一次 +1）+ 购买入口（类型 / 时长 / 数量 + 价格明细），外加一张「试用表格 /
+ * 基础表格 / 专业表格的功能区别（含价格）」对比表。
  *
  * 数量都是服务端下发的权威值（口径见 `src/shared/quota.ts`）。购买走 App 传进来的
  * `onBuy`（`POST /api/quota/purchases`），成功后会立刻刷新这里的数字。
@@ -313,10 +327,12 @@ function QuotaDialog({
 }: {
   quota: TableQuotaSet;
   onClose: () => void;
-  onBuy: (input: { kind: TableKind; count: number }) => Promise<void>;
+  onBuy: (input: { kind: TableKind; count: number; months: number }) => Promise<void>;
 }) {
   const [kind, setKind] = useState<TableKind>('basic');
   const [count, setCount] = useState(1);
+  /** 购买时长（月）：按月 1 / 按年 12（见 shared/tableKind.ts 的 `PURCHASE_MONTHS`） */
+  const [months, setMonths] = useState(1);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const meta = tableKindMeta(kind);
@@ -326,7 +342,7 @@ function QuotaDialog({
     setBusy(true);
     setError('');
     try {
-      await onBuy({ kind, count });
+      await onBuy({ kind, count, months });
       onClose();
     } catch (cause) {
       setError(cause instanceof ApiError ? cause.message : '购买失败，请稍后再试');
@@ -392,6 +408,17 @@ function QuotaDialog({
           </select>
         </label>
         <label className="field">
+          <span>购买时长</span>
+          {/* 按月（1 个月）/ 按年（12 个月）：金额 = 每月单价 × 数量 × 月数 */}
+          <select className="input" value={months} onChange={(event) => setMonths(Number(event.target.value))}>
+            {PURCHASE_MONTHS.map((value) => (
+              <option key={value} value={value}>
+                {purchaseMonthsLabel(value)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="field">
           <span>购买数量</span>
           <select className="input" value={count} onChange={(event) => setCount(Number(event.target.value))}>
             {Array.from({ length: MAX_PURCHASE_COUNT }, (_, index) => index + 1).map((value) => (
@@ -406,9 +433,18 @@ function QuotaDialog({
         </button>
       </div>
 
+      {/* 价格明细：`9.9 元/月 × 2 个 × 12 个月 = 237.6 元` */}
+      <p className="quota-price">价格：{purchasePriceText(kind, count, months)}</p>
+
       <p className="small muted">
-        选中的是「{meta.label}」：买几个就多几个可添加的{meta.label}名额（
-        {tableKindCapacityText(kind)}）。支付还没接入，点「购买」会立刻加名额并记一条购买流水。
+        选中的是「{meta.label}」：买几个就多几个可添加的{meta.label}名额（{tableKindCapacityText(kind)}）。
+        支付还没接入，点「购买」会立刻加名额并记一条购买流水。
+      </p>
+      {/* 名额来源提示：基础表格只能购买（分享不加），专业表格分享也能 +1（口径见 shared/quota.ts） */}
+      <p className="small muted">
+        {kind === 'pro'
+          ? `专业表格每分享一次（视图定向分享 / 公开链接 / 协作者）可添加数量 +${SHARE_TABLE_QUOTA}，也可以购买。`
+          : '基础表格没有赠送名额，分享也不增加，只能购买。'}
       </p>
       {error ? <p className="error small">{error}</p> : null}
     </Modal>
@@ -416,19 +452,20 @@ function QuotaDialog({
 }
 
 /**
- * 「试用/基础/专业表格可添加 N 个」里那个可点的数字：点开都是同一个「表格数量说明」弹窗。
- * 三类名额分开算，所以只是一个可点的小按钮 + 一段无障碍说明，没有别的状态。
+ * 「你有 N 个表格可」里那个可点的数字：N 是**试用 / 基础 / 专业三类名额的合计**，
+ * 点开都是同一个「表格数量说明」弹窗（弹窗里再按类型给出各自的「已添加 / 共几个 / 还剩几个」）。
+ * 只是一个可点的小按钮 + 一段无障碍说明，没有别的状态。
  */
-function QuotaCountButton({ quota, onOpen }: { quota: TableQuota; onOpen: () => void }) {
+function QuotaCountButton({ remaining, onOpen }: { remaining: number; onOpen: () => void }) {
   return (
     <button
       type="button"
       className="quota-count"
       title="表格数量规则与购买"
-      aria-label={`还可以添加 ${quota.remaining} 个${tableKindLabel(quota.kind)}，点击查看数量说明`}
+      aria-label={`还可以添加 ${remaining} 个表格（试用 / 基础 / 专业合计），点击查看数量说明`}
       onClick={onOpen}
     >
-      {quota.remaining}
+      {remaining}
     </button>
   );
 }
@@ -459,7 +496,7 @@ export function Sidebar({
   const [name, setName] = useState('');
   /**
    * 新建表格的类型（试用 / 基础 / 专业表格）：名额按类型扣。
-   * 默认给免费的试用表格 —— 新账号只有 1 个试用名额，基础 / 专业要先分享或购买。
+   * 默认给免费的试用表格 —— 新账号只有 1 个试用名额，基础要购买、专业可以分享或购买。
    */
   const [kind, setKind] = useState<TableKind>('trial');
   const [busy, setBusy] = useState(false);
@@ -482,9 +519,11 @@ export function Sidebar({
           basic: myDatabases.filter((database) => database.kind === 'basic').length,
           pro: myDatabases.filter((database) => database.kind === 'pro').length,
         });
-  /** 三类名额都空了（合计剩余 0）才把「添加」按钮置灰：还能先分享表格、邀请新用户或购买名额 */
-  const addDisabled = tableQuotaRemaining(quotaView) <= 0;
-  /** 当前选中的类型没有名额了：创建按钮置灰，提示先分享 / 邀请 / 购买 */
+  /** 三类名额合计还能再添加几个：侧边栏显示的 N（试用 + 基础 + 专业），也是「添加」是否可点的依据 */
+  const addableTotal = tableQuotaRemaining(quotaView);
+  /** 三类名额都空了（合计剩余 0）才把「添加」按钮置灰：还能邀请新用户注册或购买名额 */
+  const addDisabled = addableTotal <= 0;
+  /** 当前选中的类型没有名额了：创建按钮置灰，提示先邀请（试用）/ 购买（基础）/ 分享或购买（专业） */
   const kindHasRoom = tableQuotaHasRoom(quotaView, kind);
 
   const submit = async (event: React.FormEvent) => {
@@ -533,12 +572,12 @@ export function Sidebar({
 
       {/* 「添加表格」区（在「我的表格」上方）：名额说明 + 添加按钮 + 新建表单 */}
       <div className="sidebar-add">
-        {/* 名额说明与「添加」按钮同一行：先给免费的试用表格 */}
+        {/* 名额说明与「添加」按钮同一行：数字是试用 / 基础 / 专业三类名额的合计 */}
         <div className="sidebar-add-row">
           <p className="sidebar-add-note">
             你有
-            <QuotaCountButton quota={quotaView.trial} onOpen={() => setQuotaOpen(true)} />
-            个试用表格可
+            <QuotaCountButton remaining={addableTotal} onOpen={() => setQuotaOpen(true)} />
+            个表格可
           </p>
           <button
             type="button"
@@ -552,17 +591,6 @@ export function Sidebar({
             添加
           </button>
         </div>
-        {/* 基础 / 专业名额各自一行：三类名额分开算，点数字都是同一个说明弹窗 */}
-        <p className="sidebar-add-note quota-pro-line">
-          基础表格可添加
-          <QuotaCountButton quota={quotaView.basic} onOpen={() => setQuotaOpen(true)} />
-          个
-        </p>
-        <p className="sidebar-add-note quota-pro-line">
-          专业表格可添加
-          <QuotaCountButton quota={quotaView.pro} onOpen={() => setQuotaOpen(true)} />
-          个
-        </p>
 
         {/* 新建表格固定落成空白表格（只有「名称」字段），不再让用户挑模板 */}
         {creating && !addDisabled ? (
@@ -629,12 +657,8 @@ export function Sidebar({
             >
               <span>{database.icon || '📋'}</span>
               <span className="label">{database.name}</span>
-              {/* 表格类型徽标：试用 / 基础 / 专业（专业表容量与保留时间都不限） */}
-              <span className={`kind-tag ${database.kind}`} title={tableKindCapacityText(database.kind)}>
-                {tableKindMeta(database.kind).shortLabel}
-              </span>
-              {/* 容量条：左边记录、右边附件，剩余快用完时变黄 / 变红；点开是明细浮层 */}
-              <CapacityMeter name={database.name} capacity={database.capacity} />
+              {/* 类型徽标兼容量入口：点它弹出「记录 / 附件」明细（原来的硬盘图标已按需求去掉） */}
+              <KindCapacityTag name={database.name} kind={database.kind} capacity={database.capacity} />
               {database.locked ? (
                 <span className="small muted" title="结构已锁定">
                   🔒
@@ -693,14 +717,24 @@ export function Sidebar({
             </div>
           </div>
           <div className="sidebar-list">
+            {/* 「用户管理」（注册账号）在前，「系统管理」（站点设置 / 存储分片）紧跟其后 */}
             <button
               type="button"
-              className={`sidebar-item${adminView ? ' active' : ''}`}
-              title="用户管理"
-              onClick={onOpenAdmin}
+              className={`sidebar-item${adminView === 'users' ? ' active' : ''}`}
+              title="用户管理：注册账号的昵称 / 邮箱 / 密码 / 删除"
+              onClick={() => onOpenAdmin('users')}
+            >
+              <span>👥</span>
+              <span className="label">用户管理</span>
+            </button>
+            <button
+              type="button"
+              className={`sidebar-item${adminView === 'system' ? ' active' : ''}`}
+              title="系统管理：站点设置与存储分片"
+              onClick={() => onOpenAdmin('system')}
             >
               <span>⚙️</span>
-              <span className="label">用户管理</span>
+              <span className="label">系统管理</span>
             </button>
           </div>
         </>

@@ -1,9 +1,9 @@
 /**
- * 「后台」（超级管理员的页面）。
- *
- * 两块内容：
- *   1. 站点设置：站点名称 / 图标 / 管理员邮箱 / Resend 发信（见 SiteSettingsCard）；
- *   2. 用户管理：查看全部注册用户、修改注册信息（昵称 / 邮箱）、重置密码、批量删除账号。
+ * 「后台」的两个页面（只有超级管理员进得去，侧边栏「管理」下分成两条入口）：
+ *   1. AdminUsersPanel  用户管理：管理注册账号 —— 查看全部注册用户、修改注册信息
+ *                       （昵称 / 邮箱）、重置密码、批量删除账号；
+ *   2. AdminSystemPanel 系统管理：站点设置（站点名称 / 图标 / 管理员邮箱 / Resend 发信，
+ *                       见 SiteSettingsCard）与存储分片（见 ShardsCard）。
  * 权限在服务端（`/api/admin/*` 全部走 `requireAdmin`），这里只是入口的显隐。
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -14,10 +14,18 @@ import { ResetResultCard, type ResetResult } from './ResetResultCard';
 import { ShardsCard } from './ShardsCard';
 import { SiteSettingsCard } from './SiteSettingsCard';
 
-interface AdminPanelProps {
+/** 侧边栏「管理」下的两条入口：用户管理 / 系统管理 */
+export type AdminSection = 'users' | 'system';
+
+interface AdminUsersPanelProps {
   me: SessionUser | null;
   onToast: (message: string, kind?: 'info' | 'error') => void;
   /** 改了自己的资料 / 重置了自己的密码之后，让 App 重新拉一次会话 */
+  onReloadSession: () => void;
+}
+
+interface AdminSystemPanelProps {
+  onToast: (message: string, kind?: 'info' | 'error') => void;
   onReloadSession: () => void;
   /** 站点设置保存成功：把最新品牌信息交给 App（侧边栏标识 / 页面标题 / favicon 立刻更新） */
   onBrandingChange: (branding: BrandingResponse) => void;
@@ -31,7 +39,7 @@ export function formatTime(value: number | null): string {
   return new Date(value).toLocaleString('zh-CN', { hour12: false });
 }
 
-export function AdminPanel({ me, onToast, onReloadSession, onBrandingChange }: AdminPanelProps) {
+export function AdminUsersPanel({ me, onToast, onReloadSession }: AdminUsersPanelProps) {
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
@@ -136,14 +144,6 @@ export function AdminPanel({ me, onToast, onReloadSession, onBrandingChange }: A
 
   return (
     <section className="admin-panel">
-      <SiteSettingsCard
-        onToast={onToast}
-        onBrandingChange={onBrandingChange}
-        onReloadSession={onReloadSession}
-      />
-
-      <ShardsCard onToast={onToast} />
-
       <div className="admin-head">
         <h2 className="page-title">用户管理</h2>
         <span className="small muted">
@@ -328,6 +328,31 @@ export function AdminPanel({ me, onToast, onReloadSession, onBrandingChange }: A
           }}
         />
       ) : null}
+    </section>
+  );
+}
+
+/**
+ * 「系统管理」页：站点设置（站点名称 / 图标 / 管理员邮箱 / 发信）与存储分片。
+ *
+ * 与「用户管理」分成两个页面（侧边栏「管理」下两条各自入口）：注册账号的日常管理
+ * 与站点级配置混在一页时容易误触，分开后两页各自滚动、各自「刷新」。
+ */
+export function AdminSystemPanel({ onToast, onReloadSession, onBrandingChange }: AdminSystemPanelProps) {
+  return (
+    <section className="admin-panel">
+      <div className="admin-head">
+        <h2 className="page-title">系统管理</h2>
+        <span className="small muted">站点名称 / 图标 / 管理员邮箱 / 发信设置，以及表格数据所在的存储分片</span>
+      </div>
+
+      <SiteSettingsCard
+        onToast={onToast}
+        onBrandingChange={onBrandingChange}
+        onReloadSession={onReloadSession}
+      />
+
+      <ShardsCard onToast={onToast} />
     </section>
   );
 }

@@ -13,10 +13,10 @@ import type {
   TableKind,
   TableQuotaSet,
 } from '../shared/types';
-import { tableKindLabel } from '../shared/tableKind';
+import { purchaseMonthsLabel, tableKindLabel } from '../shared/tableKind';
 import { ApiError, api, setSessionToken, type SessionPayload } from './api';
 import { applyBranding } from './branding';
-import { AdminPanel } from './components/AdminPanel';
+import { AdminSystemPanel, AdminUsersPanel, type AdminSection } from './components/AdminPanel';
 import { AuthPage } from './components/AuthPage';
 import { ChangePasswordDialog } from './components/ChangePasswordDialog';
 import { DatabasePage } from './components/DatabasePage';
@@ -25,7 +25,6 @@ import { InvitePage } from './components/InvitePage';
 import { PublicPage } from './components/PublicPage';
 import { Sidebar } from './components/Sidebar';
 import { SiteMark } from './components/SiteMark';
-import { UserChip } from './components/UserChip';
 
 interface ToastItem {
   id: number;
@@ -134,8 +133,8 @@ export function App() {
   const [inbox, setInbox] = useState<InboxResponse>(EMPTY_INBOX);
   /** 点开私信后要打开的记录 / 备注；由 DatabasePage 消费后清空 */
   const [inboxTarget, setInboxTarget] = useState<InboxTarget | null>(null);
-  /** 主区域是否停在「用户管理」页（只有管理员进得去，服务端另有校验） */
-  const [adminView, setAdminView] = useState(false);
+  /** 主区域停在后台的哪一页（'users' 用户管理 / 'system' 系统管理；null = 看表格）。只有管理员进得去，服务端另有校验 */
+  const [adminView, setAdminView] = useState<AdminSection | null>(null);
   /** 「修改密码」弹窗 */
   const [changingPassword, setChangingPassword] = useState(false);
   /** 邀请页已经处理完（注册成功 / 点了「去登录」）：回到正常的登录或工作区 */
@@ -283,9 +282,9 @@ export function App() {
     };
   }, [shareToken, inviteToken, bootstrapSession]);
 
-  /** 不是管理员（或退出登录）时，把主区域从「用户管理」收回来 */
+  /** 不是管理员（或退出登录）时，把主区域从后台收回来 */
   useEffect(() => {
-    if (!user?.isAdmin) setAdminView(false);
+    if (!user?.isAdmin) setAdminView(null);
   }, [user]);
 
   useEffect(() => {
@@ -416,12 +415,14 @@ export function App() {
     [narrow, toast],
   );
 
-  /** 购买表格名额：服务端写一条购买流水并立刻加名额，成功后刷新侧边栏的数字 */
+  /** 购买表格名额：服务端算价（类型单价 × 数量 × 月数）并写一条购买流水，成功后刷新侧边栏的数字 */
   const buyQuota = useCallback(
-    async ({ kind, count }: { kind: TableKind; count: number }) => {
-      const result = await api.purchaseQuota({ kind, count });
+    async ({ kind, count, months }: { kind: TableKind; count: number; months: number }) => {
+      const result = await api.purchaseQuota({ kind, count, months });
       setQuota(result.quota);
-      toast(`已购买 ${count} 个${tableKindLabel(kind)}名额，现在可以添加了`);
+      toast(
+        `已购买 ${count} 个${tableKindLabel(kind)}名额（${purchaseMonthsLabel(months)}），现在可以添加了`,
+      );
     },
     [toast],
   );
@@ -440,7 +441,7 @@ export function App() {
     setDetailError('');
     setInbox(EMPTY_INBOX);
     setInboxTarget(null);
-    setAdminView(false);
+    setAdminView(null);
     setChangingPassword(false);
   }, []);
 
@@ -522,8 +523,8 @@ export function App() {
         narrow={narrow}
         onSelect={(id) => {
           setActiveId(id);
-          // 从「用户管理」切回表格
-          setAdminView(false);
+          // 从后台（用户管理 / 系统管理）切回表格
+          setAdminView(null);
           // 手机上选完表格就收起抽屉，把屏幕还给表格
           if (narrow) setSidebarOpen(false);
         }}
@@ -532,9 +533,9 @@ export function App() {
         onLogout={() => void logout()}
         onChangePassword={() => setChangingPassword(true)}
         adminView={adminView}
-        onOpenAdmin={() => {
-          setAdminView(true);
-          // 手机上点完就收起抽屉，把屏幕让给用户列表
+        onOpenAdmin={(section) => {
+          setAdminView(section);
+          // 手机上点完就收起抽屉，把屏幕让给后台页面
           if (narrow) setSidebarOpen(false);
         }}
         onInboxRefresh={() => void refreshInbox()}
@@ -571,34 +572,38 @@ export function App() {
             ) : null}
             {narrow && detail ? <span className="muted small db-hint">{detail.name}</span> : null}
             <span className="spacer" />
-            {/* 侧边栏收起时看不到侧边栏里的「用户管理」入口，这里补一个 */}
+            {/* 侧边栏收起时看不到「管理」下的入口，这里补两个后台按钮（右上角不再放邮箱 / 改密码 / 退出） */}
             {!sidebarOpen && user.isAdmin ? (
-              <button
-                type="button"
-                className="icon-btn"
-                title="用户管理"
-                aria-label="用户管理"
-                onClick={() => setAdminView((prev) => !prev)}
-              >
-                ⚙️
-              </button>
-            ) : null}
-            {/* 侧边栏收起时侧边栏底部看不见了，把「用户名 · 邮箱 · 改密码 · 退出」挪到右上角 */}
-            {!sidebarOpen ? (
-              <div className="row gap app-bar-user">
-                <UserChip
-                  user={user}
-                  onLogout={() => void logout()}
-                  onChangePassword={() => setChangingPassword(true)}
-                />
+              <div className="app-bar-admin">
+                <button
+                  type="button"
+                  className={`icon-btn${adminView === 'users' ? ' active' : ''}`}
+                  title={adminView === 'users' ? '返回表格' : '用户管理'}
+                  aria-label={adminView === 'users' ? '返回表格' : '用户管理'}
+                  aria-pressed={adminView === 'users'}
+                  onClick={() => setAdminView((prev) => (prev === 'users' ? null : 'users'))}
+                >
+                  👥
+                </button>
+                <button
+                  type="button"
+                  className={`icon-btn${adminView === 'system' ? ' active' : ''}`}
+                  title={adminView === 'system' ? '返回表格' : '系统管理'}
+                  aria-label={adminView === 'system' ? '返回表格' : '系统管理'}
+                  aria-pressed={adminView === 'system'}
+                  onClick={() => setAdminView((prev) => (prev === 'system' ? null : 'system'))}
+                >
+                  ⚙️
+                </button>
               </div>
             ) : null}
           </div>
         ) : null}
 
-        {adminView ? (
-          <AdminPanel
-            me={user}
+        {adminView === 'users' ? (
+          <AdminUsersPanel me={user} onToast={toast} onReloadSession={() => void bootstrapSession()} />
+        ) : adminView === 'system' ? (
+          <AdminSystemPanel
             onToast={toast}
             onReloadSession={() => void bootstrapSession()}
             onBrandingChange={applyBrandingChange}

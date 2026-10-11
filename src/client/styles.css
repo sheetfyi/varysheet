@@ -186,6 +186,13 @@ button {
   color: var(--text);
 }
 
+/* 顶栏上的后台按钮（用户管理 / 系统管理）：正停在那一页时给个底色，
+   侧边栏收起时它就是侧边栏里的选中态 */
+.icon-btn.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
 .input,
 select.input,
 textarea.input {
@@ -433,6 +440,7 @@ textarea.input {
 
 .quota-buy {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-end;
   gap: 8px;
   margin-bottom: 8px;
@@ -443,12 +451,12 @@ textarea.input {
   margin-bottom: 0;
 }
 
-/* 「基础 / 专业表格可添加 N 个」那两行：跟在试用表格名额下面，弱化一点 */
-.quota-pro-line {
-  display: flex;
-  align-items: center;
-  margin: 4px 0 0;
-  color: var(--text-soft);
+/* 「表格数量说明」弹窗里的价格明细：`9.9 元/月 × 2 个 × 12 个月 = 237.6 元` */
+.quota-price {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
 }
 
 /* 「表格数量说明」弹窗里的类型对比表：容量 / 存储时间 / 列数 / 视图数 */
@@ -503,43 +511,39 @@ textarea.input {
 
 /* ------------------------------------------------- 单表容量（记录数 / 附件） */
 
-/* 侧边栏每张表后面的容量入口：一个硬盘图标（💾）。
-   容量富余时是普通图标；记录 / 附件任一维度用掉 80% 起底色转浅黄、到上限转浅红 */
-.capacity-meter {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 20px;
-  border-radius: 999px;
+/* 列表里的「试用 / 基础 / 专业」徽标同时也是容量入口：点它看「记录 / 附件」用了多少
+   （原来是行尾的硬盘图标 💾，按需求改成点徽标）。容量富余时就是普通徽标；
+   记录 / 附件任一维度用掉 80% 起底色转浅黄、到上限转浅红。
+   选择器都比 .kind-tag.trial / .kind-tag.pro 多一级，档位与悬停态能盖过类型样式 */
+.kind-tag.capacity-entry {
   cursor: pointer;
-  transition: background 0.15s ease, box-shadow 0.15s ease;
+  transition: background 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
 }
 
-.capacity-meter.warn {
+.kind-tag.capacity-entry.warn {
+  border-color: var(--capacity-warn);
   background: var(--capacity-warn-soft);
+  color: var(--capacity-warn);
 }
 
-.capacity-meter.full {
+.kind-tag.capacity-entry.full {
+  border-color: var(--capacity-danger);
   background: var(--capacity-danger-soft);
+  color: var(--capacity-danger);
 }
 
-/* 悬停 / 展开时给一圈高亮：图标很小，不然看不出还能点（写在档位底色之后，优先显示） */
-.capacity-meter:hover,
-.capacity-meter.open {
+/* 悬停 / 展开时给一圈高亮：徽标很小，不然看不出还能点（写在档位底色之后，优先显示） */
+.kind-tag.capacity-entry:hover,
+.kind-tag.capacity-entry.open {
+  border-color: var(--accent);
   background: var(--accent-soft);
+  color: var(--accent);
   box-shadow: 0 0 0 1px var(--accent);
 }
 
-.capacity-meter:focus-visible {
+.kind-tag.capacity-entry:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
-}
-
-.capacity-disk {
-  font-size: 13px;
-  line-height: 1;
 }
 
 .capacity-full-tag {
@@ -1922,11 +1926,11 @@ textarea.input {
   white-space: nowrap;
 }
 
-/* 侧边栏收起时顶部条右上角的「用户名 · 邮箱 · 退出」 */
-.app-bar-user {
-  flex: 0 1 auto;
-  min-width: 0;
-  text-align: right;
+/* 侧边栏收起时顶部条的右侧：只放后台图标按钮，用户信息在侧边栏底部（不再重复一遍） */
+.app-bar-admin {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .sidebar-toggle {
