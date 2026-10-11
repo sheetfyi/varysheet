@@ -210,6 +210,26 @@ export const SHARD_SCHEMA: string[] = [
   `CREATE INDEX IF NOT EXISTS idx_files_database ON files(database_id)`,
 ];
 
+/**
+ * 分片库的**增量升级语句**（`ALTER TABLE ... ADD COLUMN`）。
+ *
+ * 为什么需要它：`SHARD_SCHEMA` 里的 `CREATE TABLE IF NOT EXISTS` 对**已经建好**的库不会
+ * 补上后加的列，所以结构有变化时必须单独补一条 ALTER。两处都要用到同一组语句：
+ *   1) 运行时：管理员后台「新建 / 挂载分片」走 `ensureShardSchema()`
+ *      （重复执行时「duplicate column name」会被跳过，见 `shards.ts`）；
+ *   2) 迁移：`migrations/tables/0002_usage_tracking.sql`（老分片靠
+ *      `wrangler d1 migrations apply <分片库>` 升级）。
+ *
+ * 注意：这里**故意不改** `SHARD_SCHEMA` 里那两张表的 `CREATE TABLE` —— 迁移文件已经跑过的库
+ * 不会重跑 0001，而新库执行 0002 时如果表里已经有这一列就会报错。
+ */
+export const SHARD_COLUMN_MIGRATIONS: string[] = [
+  // 记录 / 附件的「最后一次使用」时间（毫秒；0 = 还没记过，退回 updated_at / created_at）：
+  // 保留期清理按它算「多久没有编辑或查询」，见 src/worker/usage.ts 与 src/worker/retention.ts
+  `ALTER TABLE records ADD COLUMN last_used_at INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE files ADD COLUMN last_used_at INTEGER NOT NULL DEFAULT 0`,
+];
+
 /* ------------------------------------------------------------------ 用户库 */
 
 /**

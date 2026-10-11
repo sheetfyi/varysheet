@@ -7,9 +7,15 @@
  * `types.ts` 的 `TableQuota` / `TableQuotaSet`。
  *
  * 三类名额的来源（2026-10 口径）：
- *   试用 新注册账号送 1 个（一人一张免费试用表）+ 每成功邀请一位新用户注册 +1，不单卖；
- *   基础 没有赠送（**分享也不加**）：只能购买，9.9 元/月；
- *   专业 同样没有赠送（**分享也不加**）：只能购买，99.9 元/月。
+ *   试用 新注册账号送 1 个（一人一张免费试用表）+ 把自己的表格分享给一位新协作用户
+ *        （对方通过邀请注册成功）+1，不单卖；
+ *   基础 没有赠送（**分享也不加**）：只能订阅购买，9.9 元/月；
+ *   专业 同样没有赠送（**分享也不加**）：只能订阅购买，99.9 元/月。
+ *
+ * **删表怎么算**（2026-10 调整后）：
+ *   基础 / 专业表格删掉 = 把那个名额一起带走（不退还，钱也不退）；
+ *   试用表格删掉同样会把名额带走（无法恢复），**但**试用表格全部删完之后系统会再赠 1 个
+ *   名额 —— 保证每个账号随时都能免费拥有一张试用表格（`trialFreebieFloor()`）。
  * 购买时长按「单位 × 数量」选：单位是「月」（1 个月）或「年」（12 个月），后面再选时长数量
  * （月 1 ~ 12 个、年 1 ~ 5 个），总月数 = 单位月数 × 数量（`tableKind.ts` 的 `PURCHASE_UNITS` /
  * `purchaseMonthsOf`）；服务端只认 `PURCHASE_MONTH_OPTIONS` 里那几档月数。
@@ -32,6 +38,13 @@ export const BASE_TABLE_QUOTA: Record<TableKind, number> = { trial: 1, basic: 0,
 
 /** 每成功邀请一位新用户注册（对方真的注册成功），试用表格名额 +1 */
 export const INVITE_TRIAL_TABLE_QUOTA = 1;
+
+/**
+ * 「试用表格全部删完之后，系统自动再赠 1 个名额」的下限：只要账号里**一张试用表格都没有**，
+ * 可添加的试用名额至少是这个数 —— 也就是每个人随时都能免费拥有一张试用表格。
+ * 只在 `tableQuotaOf()` 里对 `trial` 生效；基础 / 专业表格删掉就是真的没了。
+ */
+export const TRIAL_FREEBIE_FLOOR = 1;
 
 /** 一次购买最多能选的数量（说明弹窗里的购买下拉框） */
 export const MAX_PURCHASE_COUNT = 10;
@@ -122,10 +135,9 @@ export function slotExpiredHint(kind: TableKind | string | null | undefined, exp
  */
 export const TABLE_QUOTA_RULES: string[] = [
   '名额分三类独立计算：试用表格、基础表格、专业表格。',
-  `试用表格：注册送 ${BASE_TABLE_QUOTA.trial} 个，每邀请一位新用户注册 +${INVITE_TRIAL_TABLE_QUOTA} 个，不出售；删掉试用表格会把名额还回来。`,
-  `基础表格：无赠送，只能购买，${tableKindPriceText('basic')}；分享不增加名额。`,
-  `专业表格：无赠送，只能购买，${tableKindPriceText('pro')}；分享不增加名额。`,
-  '基础表格与专业表格：删掉表格会把那个名额一起带走（名额不退还，已付的钱也不退）。',
+  `试用表格：注册赠送 1 个，把表格分享给一位新协作用户额外增加 1 个。（删除表格额度无法恢复，但试用表格全部删完后系统会再赠 1 个）`,
+  `基础表格：需订阅，${tableKindPriceText('basic')}。（删除无法恢复，订阅费不返还）`,
+  `专业表格：需订阅，${tableKindPriceText('pro')}。（删除无法恢复，订阅费不返还）`,
   `购买时长 = 单位（月 1 个月 / 年 12 个月）× 数量（月 1 ~ 12，年 1 ~ 5），总时长 ${MIN_PURCHASE_MONTHS} ~ ${MAX_PURCHASE_MONTHS} 个月；金额 = 月单价 × 表格数量 × 总月数。`,
   `基础表格与专业表格自带时长（从建表时的购买时长起算）：剩余不到 ${SLOT_RENEW_WINDOW_DAYS} 天时表格清单里会出现「续费」，续费和购买同价、同样走扫码支付。`,
   '基础表格与专业表格到期没续费时数据都还在（查看、编辑、删除、分享照常），但不能添加新记录、也不能加新视图；续费后立即恢复。',
@@ -136,26 +148,42 @@ function countOf(value: number | undefined): number {
   return Math.max(0, Math.trunc(value));
 }
 
-/** 按「已用 / 赠额（现在只有试用表格的邀请赠额）/ 已购买」算某一类的总名额与剩余可添加数量 */
+/**
+ * 按「还在的表格数（live）/ 已经删掉、把名额带走的表格数（deleted）/ 赠额 / 已购买」
+ * 算某一类的总名额与剩余可添加数量。
+ *
+ * `used`（「已用」）= live + deleted：删掉表格名额照样占着（口径见 `worker/slots.ts`）。
+ * 试用表格额外有一条**保底**：一张试用表格都没有时，剩余名额至少是 `TRIAL_FREEBIE_FLOOR`
+ * （系统自动再赠 1 个）—— 所以「把试用表格全删掉」永远不会让账号再也建不出免费表。
+ */
 export function tableQuotaOf(input: {
   kind: TableKind;
-  used: number;
+  /** 还在的（未归档的）这一类型表格数 */
+  live: number;
+  /** 已经删掉的这一类型表格数（名额被带走，不退还） */
+  deleted?: number;
+  /** 赠额（只有试用表格有，来自「分享给新协作用户」） */
   shared: number;
   purchased?: number;
 }): TableQuota {
   const kind = asTableKind(input.kind);
-  const used = countOf(input.used);
+  const live = countOf(input.live);
+  const deleted = countOf(input.deleted);
   const shared = countOf(input.shared);
   const purchased = countOf(input.purchased);
   const total = BASE_TABLE_QUOTA[kind] + shared + purchased;
-  return { kind, used, shared, purchased, total, remaining: Math.max(0, total - used) };
+  const used = live + deleted;
+  let remaining = Math.max(0, total - used);
+  // 试用表格全部删完之后系统再赠 1 个名额：账号里一张试用表格都没有时保底还能添加 1 张
+  if (kind === 'trial' && live <= 0) remaining = Math.max(remaining, TRIAL_FREEBIE_FLOOR);
+  return { kind, used, shared, purchased, total, remaining };
 }
 
-/** 三类各自的「已用 / 赠额（只有试用表格有，来自邀请新用户）/ 已购买（可选）」→ 完整名额 */
+/** 三类各自的「还在的 / 已删掉的 / 赠额 / 已购买」→ 完整名额 */
 export function tableQuotaSetOf(input: {
-  trial: { used: number; shared: number; purchased?: number };
-  basic: { used: number; shared: number; purchased?: number };
-  pro: { used: number; shared: number; purchased?: number };
+  trial: { live: number; deleted?: number; shared: number; purchased?: number };
+  basic: { live: number; deleted?: number; shared: number; purchased?: number };
+  pro: { live: number; deleted?: number; shared: number; purchased?: number };
 }): TableQuotaSet {
   return {
     trial: tableQuotaOf({ kind: 'trial', ...input.trial }),
@@ -164,12 +192,12 @@ export function tableQuotaSetOf(input: {
   };
 }
 
-/** 只知道每类已用几张表时的兜底名额（接口还没返回时先按「已用」显示，别空着） */
+/** 只知道每类还在几张表时的兜底名额（接口还没返回时先按「已有表格数」显示，别空着） */
 export function quotaSetFromUsed(used: { trial: number; basic: number; pro: number }): TableQuotaSet {
   return tableQuotaSetOf({
-    trial: { used: used.trial, shared: 0 },
-    basic: { used: used.basic, shared: 0 },
-    pro: { used: used.pro, shared: 0 },
+    trial: { live: used.trial, shared: 0 },
+    basic: { live: used.basic, shared: 0 },
+    pro: { live: used.pro, shared: 0 },
   });
 }
 

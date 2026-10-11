@@ -14,9 +14,10 @@
 import type { InviteAcceptResponse, InviteDetail } from '../../shared/types';
 import { assertSignupAllowed, createSession, hashPassword, isSecureRequest, sessionCookie, sessionTokenPayload, validatePasswordStrength, wantsTokenInBody } from '../auth';
 import { consumeInvite, inviteContext, loadInviteByToken, type LoadedInvite, type ViewInviteRecord } from '../invites';
-import { loadSiteSettings, siteIconUrl } from '../settings';
+import { loadSiteSettings, siteIconUrl, currentTermsVersion } from '../settings';
 import {
   HttpError,
+  asFlag,
   asString,
   badRequest,
   conflict,
@@ -30,6 +31,7 @@ import {
 import type { RequestContext, Route } from '../types';
 import { logChanges } from '../changes';
 import { grantTrialTable } from '../trialGrants';
+import { termsNotAccepted } from './auth';
 import { touchDatabase } from './databases';
 
 /** 取出一条仍然可用的邀请（不存在 / 用过 / 过期都会给出对应的提示）。 */
@@ -96,6 +98,8 @@ async function acceptInviteHandler(ctx: RequestContext): Promise<Response> {
   const email = invite.email;
   const name = asString(body.name, '昵称', { max: 60 }) || email.split('@')[0] || '用户';
   const password = asString(body.password, '密码', { required: true, max: 200 });
+  // 邀请注册同样是「注册」：必须先勾选「已了解系统的规则和内容合规的要求」
+  if (!asFlag(body.acceptedTerms)) throw termsNotAccepted();
 
   const problem = validatePasswordStrength(password);
   if (problem) throw badRequest(problem);
@@ -112,11 +116,13 @@ async function acceptInviteHandler(ctx: RequestContext): Promise<Response> {
 
   const userId = newId();
   const now = Date.now();
+  // 记下「同意的时刻 + 条款版本」（口径同 `/api/auth/register/verify`）
+  const settings = await loadSiteSettings(env);
   await env.DB.prepare(
-    `INSERT INTO users (id, email, name, password_hash, created_at, updated_at, is_admin)
-     VALUES (?, ?, ?, ?, ?, ?, 0)`,
+    `INSERT INTO users (id, email, name, password_hash, created_at, updated_at, is_admin, terms_accepted_at, terms_version)
+     VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`,
   )
-    .bind(userId, email, name, await hashPassword(password, env), now, now)
+    .bind(userId, email, name, await hashPassword(password, env), now, now, now, currentTermsVersion(settings))
     .run();
 
   await applyViewShare(db, invite, userId);

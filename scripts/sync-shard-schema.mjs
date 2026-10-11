@@ -5,6 +5,12 @@
  *   migrations/tables/0001_init.sql            分片库（表格库）的全部建表语句
  *   migrations/control/0012_split_table_storage.sql
  *                                              用户库里「搬走表格数据 + 登记分片表」的迁移
+ *   migrations/control/0013_note_mentions_rebuild.sql
+ *                                              用户库里「去掉指向分片库的旧外键」的收尾迁移
+ *
+ * 另外还会**核对** `migrations/tables/0002_usage_tracking.sql`（手写的「后加的列」迁移）
+ * 是否覆盖了 `src/worker/shardSchema.ts` 里的 `SHARD_COLUMN_MIGRATIONS`：
+ * 老分片库靠那个迁移文件升级，两边不一致就会出现「运行时有这一列、迁移没加」的漂移。
  *
  * 为什么要有这个脚本：建表脚本必须只有一份 —— 运行时「管理员新建备用分片」执行的是
  * `SHARD_SCHEMA`，而 `wrangler d1 migrations apply` 执行的是 .sql 文件。手抄两份迟早
@@ -159,6 +165,34 @@ for (const output of outputs) {
   }
   writeFileSync(output.file, output.sql, 'utf8');
   console.log(`${current === null ? '＋' : '↻'} 已生成 ${label}`);
+}
+
+/* ----------------------------------------- 「后加的列」迁移是否覆盖了运行时升级语句 */
+
+/**
+ * `SHARD_COLUMN_MIGRATIONS` 是运行时给「新建 / 挂载分片 + 定时清理」用的升级语句，
+ * `migrations/tables/0002_usage_tracking.sql` 是老分片库走 `wrangler d1 migrations apply`
+ * 用的 —— 两边必须一致，否则线上会出现「代码里有这一列、迁移没加」的漂移。
+ * 这里只做核对（那两份文件是手写的，含注释，不能整段生成）。
+ */
+const columnMigrationFile = join(root, 'migrations', 'tables', '0002_usage_tracking.sql');
+const columnStatements = sqlStatements('SHARD_COLUMN_MIGRATIONS');
+if (!columnStatements.length) {
+  console.error('✗ src/worker/shardSchema.ts 里的 SHARD_COLUMN_MIGRATIONS 是空的（或没找到）');
+  process.exitCode = 1;
+} else {
+  const fileSql = existsSync(columnMigrationFile) ? readFileSync(columnMigrationFile, 'utf8') : '';
+  const label = relative(root, columnMigrationFile).replaceAll('\\', '/');
+  const normalize = (sql) => sql.replace(/\s+/g, ' ').trim().replace(/;+$/, '').toLowerCase();
+  const haystack = normalize(fileSql);
+  const missing = columnStatements.filter((statement) => !haystack.includes(normalize(statement)));
+  if (missing.length) {
+    console.error(`✗ ${label} 缺少 SHARD_COLUMN_MIGRATIONS 里的语句：`);
+    for (const statement of missing) console.error(`    - ${statement}`);
+    process.exitCode = 1;
+  } else {
+    console.log(`✓ ${label} 覆盖了 SHARD_COLUMN_MIGRATIONS（${columnStatements.length} 条）`);
+  }
 }
 
 if (checkOnly && stale) process.exit(1);

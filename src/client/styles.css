@@ -509,6 +509,93 @@ textarea.input {
   font-weight: 600;
 }
 
+/* 「改密码」左边的黄色圆点 + 粗体问号：点它看系统的使用说明（需求 2026-10）。
+   做成小圆按钮，悬停时稍微放大一点，明确「可以点」。 */
+.guide-dot {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: #f2c200; /* 黄色圆点 */
+  color: #3a2c00;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 18px;
+  text-align: center;
+  cursor: pointer;
+}
+
+.guide-dot:hover,
+.guide-dot:focus-visible {
+  background: #ffd633;
+  transform: scale(1.12);
+}
+
+/* ------------------------------ 系统使用说明 / 规则与条款（弹窗 + 注册勾选） */
+
+/* 弹窗正文：纯文本按原样换行，长文本可滚动（条款有两千多字） */
+.policy-body {
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: min(62vh, 560px);
+  overflow: auto;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+  font-size: 13px;
+  line-height: 1.75;
+}
+
+/* 弹窗顶部「使用说明 / 规则与条款」的切换 */
+.policy-tabs {
+  margin-bottom: 10px;
+}
+
+.policy-tabs .btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.policy-foot {
+  margin: 8px 0 0;
+}
+
+/* 注册 / 邀请注册页的条款勾选：勾选框与「查看条款」在同一行 */
+.terms-accept {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 4px 0 10px;
+}
+
+.terms-accept-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 200px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.terms-accept-check input {
+  flex: 0 0 auto;
+}
+
+/* 后台「系统规则与使用说明」编辑器里的多行输入 */
+.policy-textarea {
+  width: 100%;
+  min-height: 160px;
+  resize: vertical;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
 /* ------------------------------------------------- 单表容量（记录数 / 附件） */
 
 /* 列表里的「试用 / 基础 / 专业」徽标同时也是容量入口：点它看「记录 / 附件」用了多少

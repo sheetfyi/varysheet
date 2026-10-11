@@ -40,6 +40,7 @@ import {
 } from './http';
 import {
   D1_DATABASE_LIMIT_BYTES,
+  SHARD_COLUMN_MIGRATIONS,
   SHARD_FILL_WARN_RATIO,
   SHARD_REGISTRY_TABLE,
   SHARD_SCHEMA,
@@ -614,9 +615,29 @@ export async function refreshAllShardUsage(env: Env): Promise<ShardRecord[]> {
   return refreshed;
 }
 
-/** 建表脚本（`CREATE TABLE IF NOT EXISTS`）在一个库里执行一遍，重复执行也安全。 */
+/**
+ * 建表脚本（`CREATE TABLE IF NOT EXISTS`）在一个库里执行一遍，重复执行也安全。
+ *
+ * 之后还会跑一遍**增量升级语句**（`SHARD_COLUMN_MIGRATIONS` 里的 `ALTER TABLE ADD COLUMN`）：
+ * `CREATE TABLE IF NOT EXISTS` 不会给已经建好的表补列，所以「新建 / 挂载分片」时要把漏掉的
+ * 列补上。已经加过的列会报 `duplicate column name`，这里直接跳过（幂等）。
+ */
 export async function ensureShardSchema(db: D1Database): Promise<void> {
   await applySqlStatements(db, SHARD_SCHEMA);
+  await applyColumnMigrations(db, SHARD_COLUMN_MIGRATIONS);
+}
+
+/** 逐条执行「加列」类语句：列已经存在（duplicate column name）时跳过，其它错误照抛 */
+export async function applyColumnMigrations(db: D1Database, statements: readonly string[]): Promise<void> {
+  for (const statement of statements) {
+    try {
+      await db.prepare(statement).run();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/duplicate column name/i.test(message)) continue;
+      throw error;
+    }
+  }
 }
 
 /** 自动生成的库名（Cloudflare 控制台里一眼能看出用途） */

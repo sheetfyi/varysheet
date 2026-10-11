@@ -6,7 +6,7 @@ Varysheet 的表格数据**不再和账号数据放在同一个 D1 库里**。D1
 
 | 库 | 绑定 | 放什么 | 迁移目录 |
 | --- | --- | --- | --- |
-| 用户库 | `DB`（`cloudnotion-db`） | 账号 / 会话 / 注册确认码 / 站点设置（含登录页副标题） / 名额购买流水（`table_purchases`）/ **支付订单（`table_orders`）** / **名额记账（`table_slot_consumptions` 删表带走的名额、`table_slot_allocations` 每张表的时长）** / 试用表格的邀请赠额（`trial_table_grants`）/ @提醒（`note_mentions`）/ **分片注册表** | `migrations/control` |
+| 用户库 | `DB`（`cloudnotion-db`） | 账号 / 会话（含注册时勾选条款的 `terms_accepted_at` / `terms_version`） / 注册确认码 / 站点设置（含登录页副标题、系统规则与条款、系统使用说明） / 名额购买流水（`table_purchases`）/ **支付订单（`table_orders`）** / **名额记账（`table_slot_consumptions` 删表带走的名额、`table_slot_allocations` 每张表的时长）** / 试用表格的邀请赠额（`trial_table_grants`）/ @提醒（`note_mentions`）/ **分片注册表** | `migrations/control` |
 | 表格分片 | `DB_TABLES_TRIAL`（`cloudnotion-tables-trial`） | 试用表格的全部数据 | `migrations/tables` |
 | 表格分片 | `DB_TABLES_BASIC`（`cloudnotion-tables-basic`） | 基础表格的全部数据 | `migrations/tables` |
 | 表格分片 | `DB_TABLES_PRO`（`cloudnotion-tables-pro`） | 专业表格的全部数据 | `migrations/tables` |
@@ -22,6 +22,11 @@ view_shares / cell_edits / notes / database_changes / invites / files
 管理员在后台「存储分片」里新建的备用分片执行的就是这同一份 DDL（`ensureShardSchema`），
 `migrations/tables/0001_init.sql` 由 `scripts/sync-shard-schema.mjs` 从它生成，两边不会漂移
 （CI 跑 `npm run schema:check`）。
+
+后续给分片加列的迁移写在 `migrations/tables/`（`0002_usage_tracking.sql` 给 `records` / `files`
+加 `last_used_at`，「最后一次使用」的时间），同时登记在 `src/worker/shardSchema.ts` 的
+`SHARD_COLUMN_MIGRATIONS` 里 —— 老分片在读取前由 `ensureShardSchema` 就地补列，
+`scripts/sync-shard-schema.mjs` 还会交叉核对两份定义，缺一份 `npm run schema:check` 就报错。
 
 ## 路由：这条数据在哪个库？
 
@@ -78,7 +83,8 @@ SQLite 的外键不能跨库，拆分之后：
 | 删记录（单条 / 批量 / 公开链接） | `routes/records.ts`、`routes/public.ts` |
 | 编辑时把附件从格子里去掉 | 同上两个文件（只删「这次真的少掉的」附件 id） |
 | 删掉「文件与媒体」列 | `routes/properties.ts` |
-| 保留期清理过期的记录与附件 | `retention.ts`（清理时容忍 R2 失败，下一轮再删） |
+| 保留期清理过期的记录与附件 | `retention.ts`（按 `last_used_at`（回退 `updated_at` / `created_at`）判定，试用 1 年 / 基础 5 年；清理时容忍 R2 失败，下一轮再删） |
+| 保留期清理「没有记录指着」的孤儿附件 | `retention.ts`（`files.database_id` 还在但记录已过期删掉的那些 `files` 行） |
 | 删整张表格 / 注销账号 | `routes/databases.ts`、`admin.ts`（按 `database_id` / `owner_id` 一次清完） |
 
 顺序是「先删 R2 对象、再删 `files` 行」；同一个 `r2_key` 被多行引用时（复制记录会克隆出

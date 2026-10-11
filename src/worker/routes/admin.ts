@@ -8,6 +8,7 @@
  *   POST   /api/admin/users/delete         批量删除账号（用户管理第一列的复选框 → 「删除选中」）
  *   GET    /api/admin/settings             「站点设置」：站点名称 / 图标 / 管理员邮箱 / Resend 密钥与发件人
  *                                            / XorPay 收款（appid + app secret，填好即刻开启微信扫码购买）
+ *                                            / 系统规则与内容合规条款 + 系统使用说明（注册勾选与侧边栏「?」）
  *   PATCH  /api/admin/settings             保存上面的设置（Resend / XorPay 密钥只回传掩码）
  *   POST   /api/admin/settings/icon        上传 / 替换站点图标（multipart，字段名 `file`）
  *   DELETE /api/admin/settings/icon        移除站点图标
@@ -215,6 +216,14 @@ async function updateSettingsHandler(ctx: RequestContext): Promise<Response> {
   if (body.resendFromEmail !== undefined) patch.resendFromEmail = normalizeFromAddress(body.resendFromEmail);
   // 登录页副标题：留空 = 清掉数据库里的值、退回默认文案（按需求做成后台可改的字段）
   if (body.loginTagline !== undefined) patch.loginTagline = asString(body.loginTagline, '登录页副标题', { max: 60 });
+  // 系统规则与内容合规条款 / 系统使用说明：留空 = 退回代码里的默认文案（见 shared/policy.ts）。
+  // 上限给得比较宽：条款本身就有两三千字，够管理员写清楚规则。
+  if (body.termsContent !== undefined) {
+    patch.termsContent = asString(body.termsContent, '系统规则与条款', { max: 20000, trim: false });
+  }
+  if (body.guideContent !== undefined) {
+    patch.guideContent = asString(body.guideContent, '系统使用说明', { max: 20000, trim: false });
+  }
   if (body.resendApiKey !== undefined) patch.resendApiKey = normalizeSecret(body.resendApiKey, 'Resend 密钥');
   // XorPay 收款：填上 appid + app secret 就立刻开启「微信扫码购买」（不用重新部署）
   if (body.xorpayAid !== undefined) patch.xorpayAid = normalizeXorpayAid(body.xorpayAid);

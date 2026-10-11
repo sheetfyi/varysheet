@@ -121,7 +121,7 @@ export function capacityStorageUsageText(capacity: DatabaseCapacity): string {
 export function capacityTooltip(capacity: DatabaseCapacity): string {
   const usage = capacityUsageSummary(capacity);
   if (capacityUnlimited(capacity)) {
-    return `${usage}\n${tableKindMeta(capacity.kind).label}：记录、附件与存储时间都不限制`;
+    return `${usage}\n${tableKindMeta(capacity.kind).label}：记录与附件不限，数据长期保留（建议清理历史数据）`;
   }
   if (!capacity.atCapacity) {
     return `${usage}\n已用 ${capacityPercent(capacity)}%：到上限后只能查看和查询，新增记录 / 上传附件 / 新建视图会停用`;
@@ -130,15 +130,18 @@ export function capacityTooltip(capacity: DatabaseCapacity): string {
 }
 
 /**
- * 保留期提示：基础表格的「数据保留 1 年，超期自动清除」写在容量浮层里，
+ * 保留期提示：试用 / 基础表格的「数据保留 1 年 / 5 年（无使用自动清除）」写在容量浮层里，
  * 专业表格返回空串（不限保留期，不用提示）。
+ *
+ * 口径是**最后一次使用**（编辑或查询）而不是创建时间，见 `src/worker/retention.ts`。
  */
 export function capacityRetentionHint(capacity: DatabaseCapacity): string {
   if (capacityUnlimited(capacity)) return '';
   const meta = tableKindMeta(capacity.kind);
   const days = capacity.retentionDays ?? meta.retentionDays;
   if (!Number.isFinite(days) || days <= 0) return '';
-  return `${meta.label}的数据保留${retentionText(days)}：超过这个时间的记录与附件会被自动清除`;
+  const text = retentionText(days);
+  return `${meta.label}的数据保留${text}：${text}内没有使用（编辑或查询）的记录与附件会被自动清除`;
 }
 
 /**

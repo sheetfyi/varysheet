@@ -92,6 +92,8 @@ interface SidebarProps {
   onLogout: () => void;
   /** 打开「修改密码」弹窗 */
   onChangePassword: () => void;
+  /** 打开「系统使用说明」弹窗（「改密码」左边的黄色「?」圆点） */
+  onOpenGuide: () => void;
   /** 当前主区域停在后台的哪一页：'users' 用户管理 / 'system' 系统管理 / null 表格页（管理员才有） */
   adminView: AdminSection | null;
   /** 打开后台的某一页（用户管理 / 系统管理，仅 `user.isAdmin` 时入口可见） */
@@ -722,6 +724,7 @@ export function Sidebar({
   onClose,
   onLogout,
   onChangePassword,
+  onOpenGuide,
   adminView,
   onOpenAdmin,
   onInboxRefresh,
@@ -1042,7 +1045,12 @@ export function Sidebar({
 
       <div className="sidebar-foot">
         <div className="row gap">
-          <UserChip user={user} onLogout={onLogout} onChangePassword={onChangePassword} />
+          <UserChip
+            user={user}
+            onLogout={onLogout}
+            onChangePassword={onChangePassword}
+            onOpenGuide={onOpenGuide}
+          />
         </div>
       </div>
     </aside>

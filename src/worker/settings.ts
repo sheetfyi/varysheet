@@ -9,6 +9,8 @@
  *   - `resend_api_key`    → `RESEND_API_KEY`      → 空（不发信，确认码走回显）
  *   - `resend_from_email` → `RESEND_FROM_EMAIL`   → `Varysheet <admin@varysheet.com>`
  *   - `login_tagline`     → （无环境变量）        → `登录以继续你的表格`（登录页副标题）
+ *   - `terms_content`     → （无环境变量）        → `DEFAULT_TERMS`（系统规则与内容合规条款：注册勾选）
+ *   - `guide_content`     → （无环境变量）        → `DEFAULT_USAGE_GUIDE`（系统使用说明：侧边栏「?」）
  *   - `xorpay_aid`        → `XORPAY_AID`          → 空（不收款，购买走自助直通）
  *   - `xorpay_app_secret` → `XORPAY_APP_SECRET`   → 空
  *
@@ -16,7 +18,8 @@
  * 不用重新部署（XorPay 的收款信息尤其方便：审核下来之后填进后台就立刻能收款）。
  * 图标本体存在 R2 的固定键 `site/branding-icon`，靠 `?v=<updated_at>` 破缓存。
  */
-import type { AdminSettings, BrandingResponse } from '../shared/types';
+import type { AdminSettings, BrandingResponse, GuideResponse } from '../shared/types';
+import { DEFAULT_TERMS, DEFAULT_USAGE_GUIDE, GUIDE_TITLE, TERMS_TITLE, policyVersion } from '../shared/policy';
 import { enabledPayTypes } from './xorpay';
 import { EMAIL_PATTERN, badRequest, sqlNumber, sqlString, type SqlRow } from './http';
 import type { Env } from './types';
@@ -57,6 +60,10 @@ const KEY_RESEND_API_KEY = 'resend_api_key';
 const KEY_RESEND_FROM = 'resend_from_email';
 /** 登录页副标题（管理员在「后台 → 站点设置」里改，保存即生效、不用重新部署） */
 const KEY_LOGIN_TAGLINE = 'login_tagline';
+/** 系统规则与内容合规条款（注册勾选时展示的正文） */
+const KEY_TERMS_CONTENT = 'terms_content';
+/** 系统使用说明（侧边栏「?」圆点打开的正文） */
+const KEY_GUIDE_CONTENT = 'guide_content';
 /** XorPay 收款（表格名额购买）：后台填了这两个就自动开启下单 */
 const KEY_XORPAY_AID = 'xorpay_aid';
 const KEY_XORPAY_APP_SECRET = 'xorpay_app_secret';
@@ -76,6 +83,13 @@ export interface SiteSettings {
   resendFromEmail: string;
   /** 登录页副标题（登录 / 注册卡片上的说明文字；没配过就是 `DEFAULT_LOGIN_TAGLINE`） */
   loginTagline: string;
+  /**
+   * 系统规则与内容合规条款的**生效正文**（数据库里配了就用它，否则是 `DEFAULT_TERMS`）。
+   * 注册（含邀请注册）时必须勾选同意，见 `routes/auth.ts`。
+   */
+  termsContent: string;
+  /** 系统使用说明的**生效正文**（数据库里配了就用它，否则是 `DEFAULT_USAGE_GUIDE`） */
+  guideContent: string;
   /** 生效中的 XorPay appid（没有就是空字符串 = 不开收款，购买走自助直通） */
   xorpayAid: string;
   /** 生效中的 XorPay app secret */
@@ -114,6 +128,9 @@ export async function loadSiteSettings(env: Env): Promise<SiteSettings> {
     resendFromEmail: text(values.get(KEY_RESEND_FROM)) || text(env.RESEND_FROM_EMAIL) || DEFAULT_FROM_EMAIL,
     // 登录页副标题：数据库里配了就用它，否则用代码默认值（没有环境变量兜底）
     loginTagline: text(values.get(KEY_LOGIN_TAGLINE)) || DEFAULT_LOGIN_TAGLINE,
+    // 系统规则与条款 / 系统使用说明：同样只在数据库里存，空 = 用代码默认文案
+    termsContent: text(values.get(KEY_TERMS_CONTENT)) || DEFAULT_TERMS,
+    guideContent: text(values.get(KEY_GUIDE_CONTENT)) || DEFAULT_USAGE_GUIDE,
     // XorPay 收款：后台填的优先，环境变量 / secret 兜底（本地开发与 CI 用后者）
     xorpayAid: text(values.get(KEY_XORPAY_AID)) || text(env.XORPAY_AID),
     xorpayAppSecret: text(values.get(KEY_XORPAY_APP_SECRET)) || text(env.XORPAY_APP_SECRET),
@@ -136,6 +153,38 @@ export function brandingPayload(settings: SiteSettings): BrandingPayload {
     updatedAt: settings.updatedAt,
     loginTagline: settings.loginTagline,
   };
+}
+
+/**
+ * 公开的「系统规则与条款 + 系统使用说明」：`GET /api/guide`（未登录也能拿）。
+ *
+ * 为什么要单独一个接口，而不是塞进 `/api/branding`：这两份正文加起来有好几 KB，
+ * 而品牌信息在每次会话探测 / 收件箱轮询里都会用到 —— 让真正需要它们的两个地方
+ * （注册页、侧边栏「?」弹窗）各拉一次就够了。
+ * `version` 是正文的短指纹，注册时会记进 `users.terms_version`。
+ */
+export type GuidePayload = GuideResponse;
+
+export function guidePayload(settings: SiteSettings): GuidePayload {
+  return {
+    terms: {
+      title: TERMS_TITLE,
+      content: settings.termsContent,
+      version: policyVersion(settings.termsContent),
+      isDefault: settings.termsContent === DEFAULT_TERMS,
+    },
+    guide: {
+      title: GUIDE_TITLE,
+      content: settings.guideContent,
+      version: policyVersion(settings.guideContent),
+      isDefault: settings.guideContent === DEFAULT_USAGE_GUIDE,
+    },
+  };
+}
+
+/** 当前生效条款的版本指纹（注册时写进 `users.terms_version`，只作留痕） */
+export function currentTermsVersion(settings: SiteSettings): string {
+  return policyVersion(settings.termsContent);
 }
 
 /** 把密钥打成 `re_ab…wxyz` 的样子给管理员看（完整值不回传）。 */
@@ -165,6 +214,11 @@ export async function adminSettingsPayload(env: Env): Promise<AdminSettingsPaylo
     // 登录页副标题：只在数据库里存（没有环境变量兜底），空 = 用代码默认值
     loginTagline: settings.loginTagline,
     loginTaglineIsDefault: settings.loginTagline === DEFAULT_LOGIN_TAGLINE,
+    // 系统规则与条款 / 系统使用说明：同样只在数据库里存，空 = 用代码默认文案
+    termsContent: settings.termsContent,
+    termsContentIsDefault: settings.termsContent === DEFAULT_TERMS,
+    guideContent: settings.guideContent,
+    guideContentIsDefault: settings.guideContent === DEFAULT_USAGE_GUIDE,
     // XorPay 收款：后台填好 appid + app secret 就立刻生效（不用重新部署）
     xorpayAid: settings.xorpayAid,
     resolvedXorpayAppSecret: maskSecret(settings.xorpayAppSecret),
@@ -191,6 +245,13 @@ export interface SiteSettingsPatch {
   resendFromEmail?: string;
   /** 登录页副标题；留空保存 = 清掉数据库里的值，退回默认文案 */
   loginTagline?: string;
+  /**
+   * 系统规则与内容合规条款；留空保存 = 清掉数据库里的值，退回代码默认文案
+   * （`src/shared/policy.ts` 的 `DEFAULT_TERMS`）。
+   */
+  termsContent?: string;
+  /** 系统使用说明；留空保存 = 清掉数据库里的值，退回代码默认文案 */
+  guideContent?: string;
   /** XorPay appid；留空保存 = 关掉收款（购买退回自助直通） */
   xorpayAid?: string;
   /** XorPay app secret；留空保存 = 关掉收款 */
@@ -213,6 +274,8 @@ export async function saveSiteSettings(env: Env, patch: SiteSettingsPatch): Prom
   if (patch.resendApiKey !== undefined) statements.push(upsert(env, KEY_RESEND_API_KEY, patch.resendApiKey, now));
   if (patch.resendFromEmail !== undefined) statements.push(upsert(env, KEY_RESEND_FROM, patch.resendFromEmail, now));
   if (patch.loginTagline !== undefined) statements.push(upsert(env, KEY_LOGIN_TAGLINE, patch.loginTagline, now));
+  if (patch.termsContent !== undefined) statements.push(upsert(env, KEY_TERMS_CONTENT, patch.termsContent, now));
+  if (patch.guideContent !== undefined) statements.push(upsert(env, KEY_GUIDE_CONTENT, patch.guideContent, now));
   if (patch.xorpayAid !== undefined) statements.push(upsert(env, KEY_XORPAY_AID, patch.xorpayAid, now));
   if (patch.xorpayAppSecret !== undefined) {
     statements.push(upsert(env, KEY_XORPAY_APP_SECRET, patch.xorpayAppSecret, now));

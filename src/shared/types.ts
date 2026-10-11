@@ -679,6 +679,33 @@ export interface BrandingResponse {
   loginTagline: string;
 }
 
+/**
+ * 一份可编辑的公示文案（系统规则与条款 / 系统使用说明）：
+ * 正文散在 `settings` 表里，管理员在「后台 → 系统管理」里改；没改过就用代码默认值
+ * （见 `src/shared/policy.ts`）。
+ */
+export interface PolicyText {
+  /** 标题（弹窗 / 编辑面板的标题） */
+  title: string;
+  /** 正文（纯文本，前端按原样换行渲染） */
+  content: string;
+  /** 正文的短指纹（注册时把条款版本记进 `users.terms_version`，便于日后核对） */
+  version: string;
+  /** 是否还是代码里的默认文案（数据库里没改过） */
+  isDefault: boolean;
+}
+
+/**
+ * `GET /api/guide`：系统使用说明 + 系统规则与内容合规条款（公开接口，未登录也能拿 ——
+ * 注册页要在提交前展示条款并让人勾选）。
+ */
+export interface GuideResponse {
+  /** 系统规则与内容合规条款（注册时勾选的那一份） */
+  terms: PolicyText;
+  /** 系统使用说明（侧边栏「改密码」左侧黄色「?」圆点打开的那一份） */
+  guide: PolicyText;
+}
+
 /** 后台「站点设置」：`GET /api/admin/settings`（Resend 密钥只回传掩码，完整值不出服务端）。 */
 export interface AdminSettings {
   siteName: string;
@@ -688,6 +715,17 @@ export interface AdminSettings {
   loginTagline: string;
   /** 登录页副标题是否就是代码里的默认值（数据库里没配） */
   loginTaglineIsDefault: boolean;
+  /**
+   * 系统规则与内容合规条款（注册勾选时展示的就是它；空 = 用代码默认文案，
+   * 见 `src/shared/policy.ts` 的 `DEFAULT_TERMS`）。
+   */
+  termsContent: string;
+  /** 条款是否就是代码里的默认文案（数据库里没改过） */
+  termsContentIsDefault: boolean;
+  /** 系统使用说明（侧边栏「?」圆点打开的说明；空 = 用代码默认文案） */
+  guideContent: string;
+  /** 使用说明是否就是代码里的默认文案（数据库里没改过） */
+  guideContentIsDefault: boolean;
   /** 生效中的超级管理员邮箱（该邮箱登录 / 带会话访问时会被自动提升为管理员） */
   adminEmail: string;
   /** 管理员邮箱是否来自 Worker 环境变量 / secret（数据库里没配） */

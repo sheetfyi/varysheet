@@ -31,6 +31,7 @@ import { ensureAdminUser } from '../admin';
 import { emailFailure, sendEmail, shouldEchoCode, verificationCodeEmail } from '../email';
 import { consumeSignupCode, issueSignupCode, resendSignupCode, type IssuedCode } from '../emailCodes';
 import {
+  asFlag,
   asString,
   badRequest,
   conflict,
@@ -44,9 +45,20 @@ import {
   type SqlRow,
 } from '../http';
 import type { Route, RequestContext, AuthedUser } from '../types';
-import { loadSiteSettings, siteIconUrl } from '../settings';
+import { currentTermsVersion, loadSiteSettings, siteIconUrl } from '../settings';
 import { listDatabases } from './databases';
 import { loadTableQuota } from './quota';
+
+/**
+ * 注册（含邀请注册）没勾选条款时的 400：错误码固定为 `terms_not_accepted`，
+ * 前端据此把提示写成「请先勾选并阅读《系统规则与内容合规条款》」。
+ */
+export function termsNotAccepted() {
+  return badRequest(
+    '请先勾选并阅读《系统规则与内容合规条款》后再注册',
+    'terms_not_accepted',
+  );
+}
 
 function sessionResponse(user: AuthedUser | null) {
   return { user };
@@ -93,6 +105,9 @@ async function registerHandler(ctx: RequestContext): Promise<Response> {
   const fallbackName = email.split('@')[0] || '用户';
   const name = asString(body.name, '昵称', { max: 60 }) || fallbackName;
 
+  // 注册必须先勾选「已了解系统的规则和内容合规的要求」：这一步就拦，别等确认码都发了才拒绝
+  if (!asFlag(body.acceptedTerms)) throw termsNotAccepted();
+
   const problem = validatePasswordStrength(password);
   if (problem) throw badRequest(problem);
 
@@ -129,11 +144,15 @@ async function verifyRegistrationHandler(ctx: RequestContext): Promise<Response>
   const userId = newId();
   const now = Date.now();
   const name = pending.name || email.split('@')[0] || '用户';
+  // 这一步能走到，说明对方拿到了第一步发出去的确认码 —— 而第一步（register）已经要求
+  // 勾选「已了解系统的规则和内容合规的要求」，所以这里直接记下「同意的时刻 + 条款版本」
+  // （`terms_version` 是当时生效条款的指纹，见 shared/policy.ts 的 policyVersion）
+  const settings = await loadSiteSettings(env);
   await env.DB.prepare(
-    `INSERT INTO users (id, email, name, password_hash, created_at, updated_at, is_admin)
-     VALUES (?, ?, ?, ?, ?, ?, 0)`,
+    `INSERT INTO users (id, email, name, password_hash, created_at, updated_at, is_admin, terms_accepted_at, terms_version)
+     VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`,
   )
-    .bind(userId, email, name, pending.passwordHash, now, now)
+    .bind(userId, email, name, pending.passwordHash, now, now, now, currentTermsVersion(settings))
     .run();
 
   // 新账号不再自动生成「我的第一个表格」（也不写任何示例数据）：

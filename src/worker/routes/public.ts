@@ -29,6 +29,7 @@ import { recordFromRow } from '../mappers';
 import { loadUserContacts } from '../notes';
 import { withDefaultStatus } from '../statusDefaults';
 import { assertSlotActive, slotExpiryOf } from '../slots';
+import { touchRecordsUsed } from '../usage';
 import type { Env, RequestContext, Route } from '../types';
 import { countRecords, loadPeopleNames, loadProperties, loadRecords, loadViews, ownerLabel, touchDatabase } from './databases';
 import { normalizeValues } from './records';
@@ -73,6 +74,8 @@ async function publicDatabaseHandler(ctx: RequestContext): Promise<Response> {
   const slotExpiresAt = await slotExpiryOf(ctx.env, share.databaseId, sqlString(row, 'owner_id'), kind);
   // 公开链接也要能显示「创建人 / 最后编辑人」的姓名（表格所有者 + 协作者）
   const people = await loadPeopleNames(ctx.env, rows);
+  // 公开链接页的查询也算「使用过」：把这些记录标成刚被用过（同一行一天只写一次）
+  await touchRecordsUsed(share.db, share.databaseId, rows.map((item) => item.id));
   // 通过该分享链接改过的格子：只读的 + 还在 10 秒计时窗口内的（勾了「限制编辑」才有）
   const cellLocks = await loadCellEditLocks(
     share.db,
@@ -134,10 +137,10 @@ async function publicCreateRecordHandler(ctx: RequestContext): Promise<Response>
   const now = Date.now();
   await db
     .prepare(
-      `INSERT INTO records (id, database_id, "values", position, created_by, updated_by, is_archived, created_at, updated_at)
-       VALUES (?, ?, ?, ?, NULL, NULL, 0, ?, ?)`,
+      `INSERT INTO records (id, database_id, "values", position, created_by, updated_by, is_archived, created_at, updated_at, last_used_at)
+       VALUES (?, ?, ?, ?, NULL, NULL, 0, ?, ?, ?)`,
     )
-    .bind(recordId, share.databaseId, JSON.stringify(values), sqlNumber(row ?? {}, 'max_position', 0) + 1000, now, now)
+    .bind(recordId, share.databaseId, JSON.stringify(values), sqlNumber(row ?? {}, 'max_position', 0) + 1000, now, now, now)
     .run();
   await touchDatabase(db, share.databaseId);
   // 通过分享链接新建的记录：表格里的协作者也会同步到
@@ -176,8 +179,10 @@ async function publicUpdateRecordHandler(ctx: RequestContext): Promise<Response>
     : changedPropertyIds(properties, current.values, values, body.values);
   await assertCellsEditable(db, share.databaseId, editorKey, ctx.params.recordId, changed, properties);
 
-  const fields = ['"values" = ?', 'updated_at = ?'];
-  const params: unknown[] = [JSON.stringify(values), Date.now()];
+  // 通过分享链接编辑也算「使用过」：updated_at / last_used_at 一起刷新
+  const touchedAt = Date.now();
+  const fields = ['"values" = ?', 'updated_at = ?', 'last_used_at = ?'];
+  const params: unknown[] = [JSON.stringify(values), touchedAt, touchedAt];
   if (body.position !== undefined) {
     fields.push('position = ?');
     params.push(asNumberValue(body.position, 'position'));

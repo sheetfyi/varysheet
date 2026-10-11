@@ -24,6 +24,7 @@ import { ChangePasswordDialog } from './components/ChangePasswordDialog';
 import { DatabasePage } from './components/DatabasePage';
 import { InboxButton } from './components/InboxButton';
 import { InvitePage } from './components/InvitePage';
+import { PolicyDialog } from './components/PolicyDialog';
 import { PublicPage } from './components/PublicPage';
 import { Sidebar } from './components/Sidebar';
 import { SiteMark } from './components/SiteMark';
@@ -164,6 +165,11 @@ export function App() {
   const [adminView, setAdminView] = useState<AdminSection | null>(null);
   /** 「修改密码」弹窗 */
   const [changingPassword, setChangingPassword] = useState(false);
+  /**
+   * 「系统使用说明 / 系统规则与条款」弹窗：侧边栏「改密码」左边的黄色「?」圆点打开
+   * （正文来自公开接口 `GET /api/guide`，见 components/PolicyDialog.tsx）。
+   */
+  const [guideOpen, setGuideOpen] = useState(false);
   /** 邀请页已经处理完（注册成功 / 点了「去登录」）：回到正常的登录或工作区 */
   const [inviteDone, setInviteDone] = useState(false);
   /** 会话拉取失败的原因（网络 / 服务端问题）。有值时未登录界面显示「重试」而不是直接判为未登录 */
@@ -620,6 +626,7 @@ export function App() {
         onClose={() => setSidebar(false)}
         onLogout={() => void logout()}
         onChangePassword={() => setChangingPassword(true)}
+        onOpenGuide={() => setGuideOpen(true)}
         adminView={adminView}
         onOpenAdmin={(section) => {
           setAdminView(section);
@@ -770,6 +777,9 @@ export function App() {
       {changingPassword ? (
         <ChangePasswordDialog onClose={() => setChangingPassword(false)} onToast={toast} />
       ) : null}
+
+      {/* 「改密码」左边的黄色「?」圆点打开的系统说明（使用说明 + 规则与条款两份可切换） */}
+      {guideOpen ? <PolicyDialog onClose={() => setGuideOpen(false)} /> : null}
 
       {toasts.length ? (
         <div className="toasts">

@@ -20,6 +20,7 @@ import {
 } from '../http';
 import type { Env, RequestContext, Route } from '../types';
 import { requireEntityShard } from '../shards';
+import { touchFilesUsed } from '../usage';
 import { touchDatabase } from './databases';
 
 /** Keep the object key readable but free of characters that upset URLs. */
@@ -176,6 +177,8 @@ async function downloadHandler(ctx: RequestContext): Promise<Response> {
     .first<SqlRow>();
   if (!row) throw notFound('文件不存在');
   await authorizeDownload(ctx, row);
+  // 下载也算「使用过」：附件的保留期按最后一次下载算（同一行一天只写一次，见 worker/usage.ts）
+  await touchFilesUsed(db, [ctx.params.id]);
 
   const key = sqlString(row, 'r2_key');
   const object = await ctx.env.BUCKET.get(key);

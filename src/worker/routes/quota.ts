@@ -3,13 +3,16 @@
  *
  * 侧边栏「你有 N 个表格可添加」、说明弹窗与购买都用它，口径与 `src/shared/quota.ts`
  * 保持一致：
- *   - 已用 = 自己拥有的、未归档的、这一类型的表格数 **+ 删表时把名额带走的基础 / 专业表格数**
- *     （`table_slot_consumptions`，见 `worker/slots.ts`；试用表格删掉会退还名额，不记账）；
- *   - 赠额：只有试用表格有 —— 成功邀请新用户注册得到的赠额（`trial_table_grants`，
- *     每邀请一位新用户 +1）；基础表格与专业表格都没有赠额（**分享也不加**，只能购买）；
+ *   - 已用 = 自己拥有的、未归档的、这一类型的表格数 **+ 删表时把名额带走的表格数**
+ *     （`table_slot_consumptions`，见 `worker/slots.ts`；三类都记账）；
+ *   - 赠额：只有试用表格有 —— 把自己的表格分享给一位新协作用户（对方通过邀请注册成功）
+ *     得到的赠额（`trial_table_grants`）；基础表格与专业表格都没有赠额
+ *     （**分享也不加**，只能订阅）；
  *   - 已购买 = `table_purchases` 里这一类型**新增名额**的 count 之和
  *     （试用表格不卖恒为 0；`database_id` 非空的续费流水不算新增名额，见下）；
- *   - 默认名额：试用 1（新注册就送一张免费试用表）、基础 / 专业 0。
+ *   - 默认名额：试用 1（新注册就送一张免费试用表）、基础 / 专业 0；
+ *   - 试用表格的**保底**：账号里一张试用表格都没有时至少还能添加 1 张
+ *     （「试用表格全部删完后系统自动再赠 1 个」，见 shared/quota.ts 的 `TRIAL_FREEBIE_FLOOR`）。
  *
  * 购买走订单（见 `src/worker/orders.ts` 与 docs/payment-xorpay.md）：
  *   - `POST /api/quota/orders`（推荐，前端在用）：body `{ kind, count, months, payType?, databaseId? }` →
@@ -34,10 +37,12 @@ import { countConsumedSlots } from '../slots';
 import { countInviteTrialGrants } from '../trialGrants';
 
 /**
- * 分片里的名额统计列：`used_*` = 自己拥有的、未归档的这一类型表格数。
- * 分享（公开链接 / 视图定向分享 / 协作者）**不再**加名额，所以这里没有 `link_*` /
- * `view_*` / `member_*`；试用表格的赠额来自用户库的 `trial_table_grants`（每成功邀请
- * 一位新用户 +1），基础 / 专业表格的名额只能购买（口径见 shared/quota.ts）。
+ * 分片里的名额统计列：`used_*` = 自己拥有的、未归档的这一类型表格数（**还在的**表格）。
+ * 删掉的那些在用户库的 `table_slot_consumptions` 里单独记账（见下面的 `consumed`），
+ * 两者相加才是「已用」。分享（公开链接 / 视图定向分享 / 协作者）**不再**加名额，
+ * 所以这里没有 `link_*` / `view_*` / `member_*`；试用表格的赠额来自用户库的
+ * `trial_table_grants`（分享给新协作用户、对方注册成功 +1），基础 / 专业表格的名额只能订阅
+ * （口径见 shared/quota.ts）。
  */
 const QUOTA_COUNT_COLUMNS = ['used_trial', 'used_basic', 'used_pro'] as const;
 
@@ -92,20 +97,24 @@ export async function loadTableQuota(env: Env, userId: string): Promise<TableQuo
 
   return tableQuotaSetOf({
     trial: {
-      // 注册送的那 1 个由 shared/quota.ts 的 BASE_TABLE_QUOTA 直接给出，不在这张流水表里
-      used: counts.used_trial,
+      // 注册赠送的那 1 个由 shared/quota.ts 的 BASE_TABLE_QUOTA 直接给出，不在这张流水表里。
+      // 删掉的试用表格也算「已用」；一张都不剩时 shared/quota.ts 会保底给回 1 个名额。
+      live: counts.used_trial,
+      deleted: consumed.trial,
       shared: invitedGrants,
       purchased: 0,
     },
     basic: {
-      // 基础表格没有赠额：分享不再加名额（口径见 shared/quota.ts），名额只能购买
-      used: counts.used_basic + consumed.basic,
+      // 基础表格没有赠额：分享不再加名额（口径见 shared/quota.ts），名额只能订阅
+      live: counts.used_basic,
+      deleted: consumed.basic,
       shared: 0,
       purchased: sqlNumber(purchaseRow ?? {}, 'bought_basic'),
     },
     pro: {
-      // 专业表格的名额也只看购买：分享不再 +1（口径见 shared/quota.ts）
-      used: counts.used_pro + consumed.pro,
+      // 专业表格的名额也只看订阅：分享不再 +1（口径见 shared/quota.ts）
+      live: counts.used_pro,
+      deleted: consumed.pro,
       shared: 0,
       purchased: sqlNumber(purchaseRow ?? {}, 'bought_pro'),
     },

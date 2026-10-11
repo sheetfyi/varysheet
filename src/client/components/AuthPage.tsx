@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
+import { TERMS_ACCEPT_LABEL } from '../../shared/policy';
 import type { RegistrationPending, SessionUser } from '../../shared/types';
 import { ApiError, api } from '../api';
 import { DEFAULT_LOGIN_TAGLINE } from '../branding';
 import { confirmSessionLanded } from '../lib/session';
+import { PolicyDialog } from './PolicyDialog';
 
 interface AuthPageProps {
   appName: string;
@@ -42,6 +44,13 @@ export function AuthPage({ appName, siteIconUrl, loginTagline, onAuthenticated }
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [cooldown, setCooldown] = useState(0);
+  /**
+   * 注册时那个「我已阅读并同意《系统规则与内容合规条款》」的勾选：
+   * 没勾上不让提交（服务端也会拦，见 `routes/auth.ts` 的 `terms_not_accepted`）。
+   */
+  const [acceptedTerms, setAcceptedTerms] = useState(false);
+  /** 「查看条款」弹窗（点勾选框旁边的《系统规则与内容合规条款》） */
+  const [termsOpen, setTermsOpen] = useState(false);
   const codeInputRef = useRef<HTMLInputElement | null>(null);
 
   // 重发倒计时
@@ -72,8 +81,18 @@ export function AuthPage({ appName, siteIconUrl, loginTagline, onAuthenticated }
         onAuthenticated(result.user);
         return;
       }
+      // 注册必须先勾选「已了解系统的规则和内容合规的要求」（服务端同样会校验）
+      if (!acceptedTerms) {
+        setError('请先勾选并阅读《系统规则与内容合规条款》');
+        return;
+      }
       // 注册第一步：Worker 会把 6 位确认码发到邮箱（本地/测试环境直接在响应里回显）
-      const result = await api.register({ email: email.trim(), password, name: name.trim() });
+      const result = await api.register({
+        email: email.trim(),
+        password,
+        name: name.trim(),
+        acceptedTerms: true,
+      });
       setPending(result);
       setCode('');
       setCooldown(RESEND_COOLDOWN_SECONDS);
@@ -138,6 +157,8 @@ export function AuthPage({ appName, siteIconUrl, loginTagline, onAuthenticated }
     setPending(null);
     setError('');
     setNotice('');
+    // 每次切到注册都要重新确认一次条款（不能沿用上一次的勾选）
+    if (next === 'register') setAcceptedTerms(false);
   };
 
 
@@ -267,12 +288,34 @@ export function AuthPage({ appName, siteIconUrl, loginTagline, onAuthenticated }
         </label>
 
         {mode === 'register' ? (
-          <p className="small muted">注册需要邮箱确认：提交后我们会把 6 位确认码发到这个邮箱。</p>
+          <>
+            <p className="small muted">注册需要邮箱确认：提交后我们会把 6 位确认码发到这个邮箱。</p>
+            {/* 注册勾选：确认已了解系统规则与内容合规要求（服务端同样校验，见 routes/auth.ts） */}
+            <div className="terms-accept">
+              <label className="terms-accept-check">
+                <input
+                  type="checkbox"
+                  checked={acceptedTerms}
+                  onChange={(event) => setAcceptedTerms(event.target.checked)}
+                  required
+                />
+                <span>{TERMS_ACCEPT_LABEL}</span>
+              </label>
+              <button type="button" className="btn ghost small" onClick={() => setTermsOpen(true)}>
+                查看条款
+              </button>
+            </div>
+          </>
         ) : null}
 
         {error ? <p className="error small">{error}</p> : null}
 
-        <button className="btn primary" type="submit" disabled={busy} style={{ width: '100%', justifyContent: 'center' }}>
+        <button
+          className="btn primary"
+          type="submit"
+          disabled={busy || (mode === 'register' && !acceptedTerms)}
+          style={{ width: '100%', justifyContent: 'center' }}
+        >
           {busy ? '处理中…' : mode === 'login' ? '登录' : '发送确认码'}
         </button>
 
@@ -287,6 +330,9 @@ export function AuthPage({ appName, siteIconUrl, loginTagline, onAuthenticated }
           </button>
         </p>
       </form>
+
+      {/* 「查看条款」：正文来自 GET /api/guide（管理员可在后台改），默认展示条款那一份 */}
+      {termsOpen ? <PolicyDialog initial="terms" onClose={() => setTermsOpen(false)} /> : null}
     </div>
   );
 }

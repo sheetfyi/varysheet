@@ -166,7 +166,7 @@ async function registerAccount({ email, name, password = PASSWORD, keepSession =
   const started = await call('/api/auth/register', {
     cookie: keepSession,
     method: 'POST',
-    body: { email, password, name },
+    body: { email, password, name, acceptedTerms: true },
   });
   const code = typeof started.data?.devCode === 'string' ? started.data.devCode : '';
   const verified = code
@@ -213,14 +213,46 @@ async function main() {
     );
   }
 
+  // ------------------------------------------------------ 公开的系统说明接口
+  section('public guide (系统使用说明 / 规则与条款)');
+  const guide = await call('/api/guide', { cookie: false });
+  check(
+    'the guide endpoint is public and carries both texts',
+    guide.status === 200 &&
+      String(guide.data?.terms?.content ?? '').includes('内容合规') &&
+      String(guide.data?.guide?.content ?? '').includes('新建表格') &&
+      guide.data?.terms?.title === '系统规则与内容合规条款' &&
+      guide.data?.guide?.title === '系统使用说明',
+    `status=${guide.status} terms=${String(guide.data?.terms?.title ?? '')} guide=${String(guide.data?.guide?.title ?? '')}`,
+  );
+  check(
+    'the guide reports whether each text is still the built-in default',
+    guide.data?.terms?.isDefault === true &&
+      guide.data?.guide?.isDefault === true &&
+      /^[0-9a-f]{8}$/.test(String(guide.data?.terms?.version ?? '')),
+    `termsDefault=${guide.data?.terms?.isDefault} version=${guide.data?.terms?.version ?? ''}`,
+  );
+
   // ---------------------------------------------------------------- account
   section('account');
   const email = `smoke+${Date.now()}@example.com`;
 
+  // 注册必须勾选「已了解系统的规则和内容合规的要求」：没勾选在发确认码之前就被拒
+  const noTerms = await call('/api/auth/register', {
+    cookie: false,
+    method: 'POST',
+    body: { email, password: PASSWORD, name: 'No Terms' },
+  });
+  check(
+    'register without accepting the terms is a 400',
+    noTerms.status === 400 && noTerms.data?.error?.code === 'terms_not_accepted',
+    `status=${noTerms.status} code=${noTerms.data?.error?.code ?? ''}`,
+  );
+
   // 第一步：只提交注册信息 -> 202 + 确认码（保留测试域会回显在 devCode 里）
   const pending = await call('/api/auth/register', {
     method: 'POST',
-    body: { email, password: PASSWORD, name: 'Smoke Tester' },
+    body: { email, password: PASSWORD, name: 'Smoke Tester', acceptedTerms: true },
   });
   if (pending.status === 403) console.error('   (signup is disabled: ALLOW_SIGNUP="false")');
   check(
@@ -251,7 +283,7 @@ async function main() {
   const tooSoon = await call('/api/auth/register', {
     cookie: false,
     method: 'POST',
-    body: { email, password: PASSWORD, name: 'Smoke Tester' },
+    body: { email, password: PASSWORD, name: 'Smoke Tester', acceptedTerms: true },
   });
   check('signup is throttled (60s cooldown)', tooSoon.status === 429, `status=${tooSoon.status}`);
 
@@ -284,7 +316,7 @@ async function main() {
 
   const takenEmail = await call('/api/auth/register', {
     method: 'POST',
-    body: { email, password: PASSWORD, name: 'Copy Cat' },
+    body: { email, password: PASSWORD, name: 'Copy Cat', acceptedTerms: true },
   });
   check('a registered email cannot sign up again', takenEmail.status === 409, `status=${takenEmail.status}`);
 
@@ -1536,16 +1568,27 @@ async function main() {
 
   const weakInviteAccept = await call(`/api/invites/${inviteToken}/accept`, {
     method: 'POST',
-    body: { name: '受邀人', password: 'short' },
+    body: { name: '受邀人', password: 'short', acceptedTerms: true },
   });
   check('the invited signup enforces the password rules', weakInviteAccept.status === 400, `status=${weakInviteAccept.status}`);
+
+  // 邀请注册同样要求勾选条款：没勾选直接 400 terms_not_accepted（也不该消耗掉这条邀请）
+  const noTermsInviteAccept = await call(`/api/invites/${inviteToken}/accept`, {
+    method: 'POST',
+    body: { name: '受邀人', password: invitePassword },
+  });
+  check(
+    'the invited signup also requires accepting the terms',
+    noTermsInviteAccept.status === 400 && noTermsInviteAccept.data?.error?.code === 'terms_not_accepted',
+    `status=${noTermsInviteAccept.status} code=${noTermsInviteAccept.data?.error?.code ?? ''}`,
+  );
 
   // 4) 填昵称 + 密码完成注册：直接拿到会话（cookie 换成新账号）
   // 接受之前先记下邀请人的试用名额：成功邀请一位新用户应当 +1（见 worker/trialGrants.ts）
   const inviterTrialBefore = (await call('/api/quota')).data?.quota;
   const accepted = await call(`/api/invites/${inviteToken}/accept`, {
     method: 'POST',
-    body: { name: '受邀同事', password: invitePassword },
+    body: { name: '受邀同事', password: invitePassword, acceptedTerms: true },
   });
   check(
     'accepting the invite registers the account',
@@ -2363,14 +2406,14 @@ async function main() {
     `used=${beforeQuota?.basic?.used}->${afterCreate?.basic?.used} remaining=${beforeQuota?.basic?.remaining}->${afterCreate?.basic?.remaining}`,
   );
 
-  // 容量口径：基础表格 500 条 / 1GB / 保留一年；专业表格三个维度都不限
+  // 容量口径：基础表格 500 条 / 1GB / 保留 5 年（无使用自动清除）；专业表格三个维度都不限
   const basicCapacity = quotaTable.data?.capacity;
   check(
     'a basic table keeps the record / storage / retention limits',
     basicCapacity?.kind === 'basic' &&
       basicCapacity?.unlimited === false &&
       basicCapacity?.maxRecords === maxRecords &&
-      basicCapacity?.retentionDays === 365,
+      basicCapacity?.retentionDays === 365 * 5,
     `maxRecords=${basicCapacity?.maxRecords} retentionDays=${basicCapacity?.retentionDays}`,
   );
 
@@ -2506,12 +2549,12 @@ async function main() {
   );
   const trialCapacity = trialTable.data?.capacity;
   check(
-    'a trial table caps records / storage at 100 / 512MB and expires in half a year',
+    'a trial table caps records / storage at 100 / 512MB and keeps data for a year',
     trialCapacity?.kind === 'trial' &&
       trialCapacity?.unlimited === false &&
       trialCapacity?.maxRecords === 100 &&
       trialCapacity?.maxStorageBytes === 512 * 1024 * 1024 &&
-      trialCapacity?.retentionDays === 180,
+      trialCapacity?.retentionDays === 365,
     `kind=${trialCapacity?.kind} maxRecords=${trialCapacity?.maxRecords} maxStorageBytes=${trialCapacity?.maxStorageBytes} retentionDays=${trialCapacity?.retentionDays}`,
   );
   const afterTrialCreate = (await call('/api/quota')).data?.quota;
@@ -2543,19 +2586,40 @@ async function main() {
     `filled=${trialFillerIds.length}/${trialFillerCount} status=${noTrialSlot.status} message=${noTrialSlot.data?.error?.message ?? ''}`,
   );
 
-  for (const id of [trialTable.data?.id, ...trialFillerIds].filter(Boolean)) {
+  // 删表怎么算（2026-10 口径，见 shared/quota.ts 与 worker/slots.ts）：
+  //   试用表格删掉同样会把名额带走（无法恢复），但**全部删完**时系统再赠 1 个名额
+  //   （保证每个人随时都有一张免费试用表格）。所以分两步验：先删一张（还有别的表在）→ 名额不回；
+  //   再把剩下的全删 → 剩 1 个可添加。
+  const createdTrialIds = [trialTable.data?.id, ...trialFillerIds].filter(Boolean);
+  const createdTrialCount = beforeTrial?.trial?.remaining ?? 0;
+  await call(`/api/databases/${createdTrialIds[0]}`, { method: 'DELETE' });
+  const afterOneTrialDelete = (await call('/api/quota')).data?.quota;
+  if (createdTrialCount >= 2) {
+    check(
+      'deleting one of several trial tables keeps its slot spent (no refund)',
+      afterOneTrialDelete?.trial?.used === (beforeTrial?.trial?.used ?? 0) + createdTrialCount &&
+        afterOneTrialDelete?.trial?.remaining === 0,
+      `trial=${JSON.stringify(afterOneTrialDelete?.trial)}`,
+    );
+  }
+
+  for (const id of createdTrialIds.slice(1)) {
     await call(`/api/databases/${id}`, { method: 'DELETE' });
   }
   const settledTrial = (await call('/api/quota')).data?.quota;
+  // 现在还剩几张试用表格？一张都不剩 = 保底再给 1 个名额（「全部删完后系统再赠 1 个」）
+  const liveTrialTables = ((await call('/api/session')).data?.databases ?? []).filter(
+    (item) => item.kind === 'trial',
+  ).length;
   check(
-    'deleting the trial tables gives the trial slots back',
-    settledTrial?.trial?.used === beforeTrial?.trial?.used &&
-      settledTrial?.trial?.remaining === beforeTrial?.trial?.remaining,
-    `trial=${JSON.stringify(settledTrial?.trial)}`,
+    'deleting every trial table spends the slots but gifts one free trial table back',
+    settledTrial?.trial?.used === (beforeTrial?.trial?.used ?? 0) + createdTrialCount &&
+      settledTrial?.trial?.remaining === (liveTrialTables === 0 ? 1 : 0),
+    `trial=${JSON.stringify(settledTrial?.trial)} live=${liveTrialTables}`,
   );
 
   // 清理：删掉分享链接与这两张测试表。**基础 / 专业表格删掉不退还名额**（口径见 worker/slots.ts）：
-  // 「已用」不回落、可添加的数量也不会回来（试用表格那一段已经验过会退还）。
+  // 「已用」不回落、可添加的数量也不会回来。
   await call(`/api/shares/${(quotaShare.data?.shares ?? [])[0]?.id}`, { method: 'DELETE' });
   const removedProTable = await call(`/api/databases/${proTable.data?.id}`, { method: 'DELETE' });
   const removedQuotaTable = await call(`/api/databases/${quotaTable.data?.id}`, { method: 'DELETE' });
@@ -2771,6 +2835,41 @@ async function main() {
       'clearing the login tagline falls back to the built-in default',
       clearedTagline.status === 200 && clearedTagline.data?.settings?.loginTaglineIsDefault === true,
       `tagline=${clearedTagline.data?.settings?.loginTagline ?? ''}`,
+    );
+
+    // 「后台 → 系统管理」里的系统规则与条款 / 系统使用说明：改完立刻生效（公开接口立刻拿得到）
+    const customTerms = `【冒烟测试】内容合规条款 ${Date.now()}：禁止上传违法违规内容。`;
+    const customGuide = `【冒烟测试】使用说明 ${Date.now()}：点「添加」新建一张表格。`;
+    const savedPolicy = await asAdmin('/api/admin/settings', {
+      method: 'PATCH',
+      body: { termsContent: customTerms, guideContent: customGuide },
+    });
+    const publicGuideCustom = await call('/api/guide', { cookie: false });
+    check(
+      'the admin can edit the terms and the usage guide',
+      savedPolicy.status === 200 &&
+        savedPolicy.data?.settings?.termsContentIsDefault === false &&
+        savedPolicy.data?.settings?.guideContentIsDefault === false &&
+        publicGuideCustom.data?.terms?.content === customTerms &&
+        publicGuideCustom.data?.guide?.content === customGuide,
+      `status=${savedPolicy.status} terms=${String(publicGuideCustom.data?.terms?.content ?? '').slice(0, 14)}`,
+    );
+    check(
+      'editing the terms changes the version fingerprint',
+      /^[0-9a-f]{8}$/.test(String(publicGuideCustom.data?.terms?.version ?? '')) &&
+        publicGuideCustom.data?.terms?.version !== guide.data?.terms?.version,
+      `before=${guide.data?.terms?.version ?? ''} after=${publicGuideCustom.data?.terms?.version ?? ''}`,
+    );
+    const clearedPolicy = await asAdmin('/api/admin/settings', {
+      method: 'PATCH',
+      body: { termsContent: '', guideContent: '' },
+    });
+    check(
+      'clearing the texts falls back to the built-in defaults',
+      clearedPolicy.status === 200 &&
+        clearedPolicy.data?.settings?.termsContentIsDefault === true &&
+        clearedPolicy.data?.settings?.guideContentIsDefault === true,
+      `termsDefault=${clearedPolicy.data?.settings?.termsContentIsDefault} guideDefault=${clearedPolicy.data?.settings?.guideContentIsDefault}`,
     );
 
     const renamed = smokeUser

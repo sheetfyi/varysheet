@@ -10,6 +10,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AdminUser, BrandingResponse, SessionUser } from '../../shared/types';
 import { ApiError, api } from '../api';
 import { EditUserDialog } from './EditUserDialog';
+import { PolicyEditorCard } from './PolicyEditorCard';
 import { ResetResultCard, type ResetResult } from './ResetResultCard';
 import { ShardsCard } from './ShardsCard';
 import { SiteSettingsCard } from './SiteSettingsCard';
@@ -333,7 +334,8 @@ export function AdminUsersPanel({ me, onToast, onReloadSession }: AdminUsersPane
 }
 
 /**
- * 「系统管理」页：站点设置（站点名称 / 图标 / 管理员邮箱 / 发信）与存储分片。
+ * 「系统管理」页：站点设置（站点名称 / 图标 / 管理员邮箱 / 发信）、系统规则与使用说明
+ * （注册勾选的条款 + 侧边栏「?」的说明）与存储分片。
  *
  * 与「用户管理」分成两个页面（侧边栏「管理」下两条各自入口）：注册账号的日常管理
  * 与站点级配置混在一页时容易误触，分开后两页各自滚动、各自「刷新」。
@@ -343,7 +345,9 @@ export function AdminSystemPanel({ onToast, onReloadSession, onBrandingChange }:
     <section className="admin-panel">
       <div className="admin-head">
         <h2 className="page-title">系统管理</h2>
-        <span className="small muted">站点名称 / 图标 / 管理员邮箱 / 发信设置，以及表格数据所在的存储分片</span>
+        <span className="small muted">
+          站点名称 / 图标 / 管理员邮箱 / 发信设置、系统规则与使用说明，以及表格数据所在的存储分片
+        </span>
       </div>
 
       <SiteSettingsCard
@@ -351,6 +355,8 @@ export function AdminSystemPanel({ onToast, onReloadSession, onBrandingChange }:
         onBrandingChange={onBrandingChange}
         onReloadSession={onReloadSession}
       />
+
+      <PolicyEditorCard onToast={onToast} />
 
       <ShardsCard onToast={onToast} />
     </section>

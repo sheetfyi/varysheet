@@ -21,6 +21,7 @@ import type {
   DatabaseDetail,
   DatabaseSummary,
   FieldType,
+  GuideResponse,
   InboxResponse,
   InviteAcceptResponse,
   InviteDetail,
@@ -209,8 +210,17 @@ export const api = {
   session: (signal?: AbortSignal) => json<SessionPayload>('/api/session', 'GET', undefined, signal),
   /** 公开的品牌信息（站点名称 / 图标）：登录页、页面标题与 favicon 用，不需要登录 */
   branding: () => json<BrandingResponse>('/api/branding', 'GET'),
-  /** 注册第一步：只登记待确认的注册并发确认码，账号要等 `verifyRegistration` 之后才存在 */
-  register: (body: { email: string; password: string; name: string }) =>
+  /**
+   * 公开的「系统使用说明 + 系统规则与内容合规条款」（`GET /api/guide`）：
+   * 注册页要展示条款正文并让人勾选，侧边栏「?」圆点用它显示使用说明。
+   */
+  guide: () => json<GuideResponse>('/api/guide', 'GET'),
+  /**
+   * 注册第一步：只登记待确认的注册并发确认码，账号要等 `verifyRegistration` 之后才存在。
+   * `acceptedTerms` 是注册时那个「我已阅读并同意《系统规则与内容合规条款》」的勾选，
+   * 必须为 true（服务端会拦，见 `routes/auth.ts`）。
+   */
+  register: (body: { email: string; password: string; name: string; acceptedTerms: boolean }) =>
     json<RegistrationPending>('/api/auth/register', 'POST', body),
   /** 注册第二步：填确认码，成功即返回已登录用户 */
   verifyRegistration: (body: { email: string; code: string; tokenInBody?: boolean }) =>
@@ -270,6 +280,10 @@ export const api = {
     resendFromEmail?: string;
     /** 登录页副标题（留空 = 清掉数据库里的值，退回默认文案） */
     loginTagline?: string;
+    /** 系统规则与内容合规条款（留空 = 退回代码默认文案） */
+    termsContent?: string;
+    /** 系统使用说明（留空 = 退回代码默认文案） */
+    guideContent?: string;
     /** XorPay 收款（表格名额购买）：填好 appid + app secret 就立刻开启微信扫码下单 */
     xorpayAid?: string;
     xorpayAppSecret?: string;
@@ -309,7 +323,7 @@ export const api = {
   /** 受邀人打开邀请链接：邀请信息（表格 / 视图 / 邀请人），无需登录 */
   invite: (token: string) => json<{ invite: InviteDetail }>(`/api/invites/${encodeURIComponent(token)}`, 'GET'),
   /** 接受邀请：填昵称 + 密码即完成注册，并直接登录（自动获得该视图分享） */
-  acceptInvite: (token: string, body: { name: string; password: string; tokenInBody?: boolean }) =>
+  acceptInvite: (token: string, body: { name: string; password: string; acceptedTerms: boolean; tokenInBody?: boolean }) =>
     json<InviteAcceptResponse>(`/api/invites/${encodeURIComponent(token)}/accept`, 'POST', body),
 
   /**

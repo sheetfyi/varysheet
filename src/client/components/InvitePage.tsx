@@ -6,9 +6,11 @@
  * 注册成功会自动登录并直接看到被分享的视图。
  */
 import { useEffect, useState } from 'react';
+import { TERMS_ACCEPT_LABEL } from '../../shared/policy';
 import type { InviteDetail, SessionUser } from '../../shared/types';
 import { ApiError, api } from '../api';
 import { confirmSessionLanded } from '../lib/session';
+import { PolicyDialog } from './PolicyDialog';
 
 interface InvitePageProps {
   token: string;
@@ -25,6 +27,9 @@ export function InvitePage({ token, onAuthenticated, onGoToLogin }: InvitePagePr
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  /** 邀请注册同样要勾选「已了解系统的规则和内容合规的要求」（服务端会拦） */
+  const [acceptedTerms, setAcceptedTerms] = useState(false);
+  const [termsOpen, setTermsOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -46,10 +51,14 @@ export function InvitePage({ token, onAuthenticated, onGoToLogin }: InvitePagePr
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
-    setBusy(true);
     setError('');
+    if (!acceptedTerms) {
+      setError('请先勾选并阅读《系统规则与内容合规条款》');
+      return;
+    }
+    setBusy(true);
     try {
-      const result = await api.acceptInvite(token, { name: name.trim(), password });
+      const result = await api.acceptInvite(token, { name: name.trim(), password, acceptedTerms: true });
       // 邀请已经消费掉了，兜底只能走刚设置的密码重新登录（cookie 存不下来的浏览器）
       const landing = await confirmSessionLanded({ email: detail?.email ?? '', password });
       if (!landing.ok) {
@@ -134,9 +143,30 @@ export function InvitePage({ token, onAuthenticated, onGoToLogin }: InvitePagePr
 
         <p className="small muted">密码需要同时包含字母和数字，至少 8 位。</p>
 
+        {/* 邀请注册同样要确认已了解系统规则与内容合规要求 */}
+        <div className="terms-accept">
+          <label className="terms-accept-check">
+            <input
+              type="checkbox"
+              checked={acceptedTerms}
+              onChange={(event) => setAcceptedTerms(event.target.checked)}
+              required
+            />
+            <span>{TERMS_ACCEPT_LABEL}</span>
+          </label>
+          <button type="button" className="btn ghost small" onClick={() => setTermsOpen(true)}>
+            查看条款
+          </button>
+        </div>
+
         {error ? <p className="error small">{error}</p> : null}
 
-        <button className="btn primary" type="submit" disabled={busy} style={{ width: '100%', justifyContent: 'center' }}>
+        <button
+          className="btn primary"
+          type="submit"
+          disabled={busy || !acceptedTerms}
+          style={{ width: '100%', justifyContent: 'center' }}
+        >
           {busy ? '处理中…' : '完成注册并查看'}
         </button>
 
@@ -147,6 +177,8 @@ export function InvitePage({ token, onAuthenticated, onGoToLogin }: InvitePagePr
           </button>
         </p>
       </form>
+
+      {termsOpen ? <PolicyDialog initial="terms" onClose={() => setTermsOpen(false)} /> : null}
     </div>
   );
 }

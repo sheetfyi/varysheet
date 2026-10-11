@@ -7,7 +7,9 @@
  * 三类的区别（容量与保留期的执行见 `src/worker/capacity.ts`、
  * `src/worker/retention.ts`）：
  *   容量     试用：100 条记录 / 0.5GB 附件   基础：500 条记录 / 1GB 附件   专业：不限
- *   存储时间 试用：半年（超期自动清除）        基础：1 年（超期自动清除）   专业：永久保留
+ *   存储时间 试用：1 年                      基础：5 年                   专业：长期保留
+ *            （试用 / 基础按「最后一次使用」算：1 年 / 5 年内没有编辑或查询的记录与附件
+ *              由定时任务自动清除；专业表格不清理，但建议自行清理历史数据）
  *   列数     试用：10 列                      基础：15 列                 专业：20 列
  *   视图数   试用：3 个                       基础：5 个                  专业：10 个
  *   购买价格 试用：免费（不单卖）              基础：9.9 元/月             专业：99.9 元/月
@@ -54,10 +56,10 @@ export const TABLE_KIND_META: Record<TableKind, TableKindMeta> = {
     kind: 'trial',
     label: '试用表格',
     shortLabel: '试用',
-    summary: '100 条记录 / 0.5GB 附件，数据保留半年，最多 10 列 / 3 个视图',
+    summary: '100 条记录 / 0.5GB 附件，1 年无使用的记录自动清除，最多 10 列 / 3 个视图',
     maxRecords: 100,
     maxStorageBytes: 512 * BYTES_PER_MB, // 0.5GB
-    retentionDays: 180, // 半年；超期的记录与附件会被定时任务清除
+    retentionDays: 365, // 1 年没有编辑 / 查询的记录与附件由定时任务清除
     maxProperties: 10,
     maxViews: 3,
     monthlyPriceCents: 0, // 免费送 1 个，不单卖
@@ -66,10 +68,10 @@ export const TABLE_KIND_META: Record<TableKind, TableKindMeta> = {
     kind: 'basic',
     label: '基础表格',
     shortLabel: '基础',
-    summary: '500 条记录 / 1GB 附件，数据保留 1 年，最多 15 列 / 5 个视图',
+    summary: '500 条记录 / 1GB 附件，5 年无使用的记录自动清除，最多 15 列 / 5 个视图',
     maxRecords: 500,
     maxStorageBytes: 1024 * BYTES_PER_MB, // 1GB
-    retentionDays: 365, // 一年；超过一年的记录与附件会被定时任务清除
+    retentionDays: 365 * 5, // 5 年没有编辑 / 查询的记录与附件由定时任务清除
     maxProperties: 15,
     maxViews: 5,
     monthlyPriceCents: 990, // 9.9 元/月
@@ -78,10 +80,10 @@ export const TABLE_KIND_META: Record<TableKind, TableKindMeta> = {
     kind: 'pro',
     label: '专业表格',
     shortLabel: '专业',
-    summary: '记录、附件与存储时间都不限，最多 20 列 / 10 个视图',
+    summary: '记录、附件与存储时间都不限（长期保留，建议清理历史数据），最多 20 列 / 10 个视图',
     maxRecords: 0,
     maxStorageBytes: 0,
-    retentionDays: 0,
+    retentionDays: 0, // 长期保留：定时任务不清理专业表格（记录过多会变慢，建议自行清理）
     maxProperties: 20,
     maxViews: 10,
     monthlyPriceCents: 9990, // 99.9 元/月
@@ -121,9 +123,9 @@ export function tableKindLabel(kind: TableKind | string | null | undefined): str
   return tableKindMeta(kind).label;
 }
 
-/** 「1 年」「半年」「永久保留」「30 天」这类保留期文案 */
+/** 「1 年」「5 年」「长期保留」「30 天」这类保留期文案 */
 export function retentionText(days: number): string {
-  if (!Number.isFinite(days) || days <= 0) return '永久保留';
+  if (!Number.isFinite(days) || days <= 0) return '长期保留';
   if (days === 365) return '1 年';
   if (days % 365 === 0) return `${days / 365} 年`;
   if (days === 180) return '半年';
@@ -318,9 +320,9 @@ export const TABLE_KIND_FEATURES: TableKindFeature[] = [
   },
   {
     label: '存储时间',
-    trial: `${retentionText(TABLE_KIND_META.trial.retentionDays)}（超期清除）`,
-    basic: `${retentionText(TABLE_KIND_META.basic.retentionDays)}（超期清除）`,
-    pro: retentionText(TABLE_KIND_META.pro.retentionDays),
+    trial: `${retentionText(TABLE_KIND_META.trial.retentionDays)}无使用自动清除`,
+    basic: `${retentionText(TABLE_KIND_META.basic.retentionDays)}无使用自动清除`,
+    pro: `${retentionText(TABLE_KIND_META.pro.retentionDays)}（建议清理历史数据）`,
   },
   {
     label: '列数',
@@ -336,14 +338,14 @@ export const TABLE_KIND_FEATURES: TableKindFeature[] = [
   },
   {
     label: '名额来源',
-    trial: '注册送 1 个，邀请 +1，不出售',
-    basic: '只能购买（分享不加）',
-    pro: '只能购买（分享不加）',
+    trial: '注册赠送 1 个，分享给新协作用户 +1，不出售',
+    basic: '需订阅（分享不加）',
+    pro: '需订阅（分享不加）',
   },
   {
     label: '价格',
-    trial: '免费（注册送 1 个）',
-    basic: `${tableKindPriceText('basic')}（按时长购买）`,
-    pro: `${tableKindPriceText('pro')}（按时长购买）`,
+    trial: '免费（注册赠送 1 个）',
+    basic: `${tableKindPriceText('basic')}（按时长订阅）`,
+    pro: `${tableKindPriceText('pro')}（按时长订阅）`,
   },
 ];

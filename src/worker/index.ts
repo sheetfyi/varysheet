@@ -12,6 +12,7 @@ import { authRoutes } from './routes/auth';
 import { brandingRoutes } from './routes/branding';
 import { databaseRoutes } from './routes/databases';
 import { fileRoutes } from './routes/files';
+import { guideRoutes } from './routes/guide';
 import { inviteRoutes } from './routes/invites';
 import { noteRoutes } from './routes/notes';
 import { propertyRoutes } from './routes/properties';
@@ -28,6 +29,7 @@ import type { Env, RequestContext, Route, RouteHandler } from './types';
 const API_ROUTES: Route[] = [
   ...authRoutes,
   ...brandingRoutes,
+  ...guideRoutes, // 系统使用说明 + 系统规则与条款（公开，注册页与侧边栏「?」都用）
   ...inviteRoutes,
   ...adminRoutes,
   ...shardRoutes,
@@ -164,8 +166,8 @@ export default {
 
   /**
    * 定时任务（`wrangler.jsonc` 的 `triggers.crons`，每天 03:00 UTC）：
-   * 清理试用 / 基础表格里超过保留期（默认半年 / 一年）的记录与附件 —— 专业表格不受影响。
-   * 逻辑见 `src/worker/retention.ts`；管理员也可以手动跑
+   * 清理试用 / 基础表格里超过保留期（1 年 / 5 年没有编辑或查询）的记录与附件 ——
+   * 专业表格长期保留、不受影响。逻辑见 `src/worker/retention.ts`；管理员也可以手动跑
    * `POST /api/admin/maintenance/retention`。
    */
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {

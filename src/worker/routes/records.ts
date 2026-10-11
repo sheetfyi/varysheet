@@ -31,6 +31,7 @@ import { loadNotes } from '../notes';
 import { tableDb } from '../shards';
 import { assertSlotActive } from '../slots';
 import { withDefaultStatus } from '../statusDefaults';
+import { touchRecordsUsed } from '../usage';
 import type { RequestContext, Route } from '../types';
 import { countRecords, loadProperties, loadRecord, loadRecords, touchDatabase } from './databases';
 
@@ -121,8 +122,8 @@ async function createRecordHandler(ctx: RequestContext): Promise<Response> {
   const now = Date.now();
   await db
     .prepare(
-      `INSERT INTO records (id, database_id, "values", position, created_by, updated_by, is_archived, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+      `INSERT INTO records (id, database_id, "values", position, created_by, updated_by, is_archived, created_at, updated_at, last_used_at)
+       VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
     )
     .bind(
       recordId,
@@ -132,6 +133,8 @@ async function createRecordHandler(ctx: RequestContext): Promise<Response> {
       user.id,
       user.id,
       now,
+      now,
+      // 新建就是「使用过」：保留期清理按最后一次使用算（见 worker/usage.ts）
       now,
     )
     .run();
@@ -189,9 +192,9 @@ async function bulkCreateHandler(ctx: RequestContext): Promise<Response> {
     ids.push(id);
     statements.push(
       db.prepare(
-        `INSERT INTO records (id, database_id, "values", position, created_by, updated_by, is_archived, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`,
-      ).bind(id, ctx.params.id, JSON.stringify(values), position, user.id, user.id, now, now),
+        `INSERT INTO records (id, database_id, "values", position, created_by, updated_by, is_archived, created_at, updated_at, last_used_at)
+         VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+      ).bind(id, ctx.params.id, JSON.stringify(values), position, user.id, user.id, now, now, now),
     );
     position += 1;
   }
@@ -239,8 +242,10 @@ async function updateRecordHandler(ctx: RequestContext): Promise<Response> {
     : changedPropertyIds(properties, current.values, values, body.values);
   await assertCellsEditable(db, access.databaseId, editorKey, ctx.params.id, changed, properties);
 
-  const fields = ['"values" = ?', 'updated_by = ?', 'updated_at = ?'];
-  const params: unknown[] = [JSON.stringify(values), user.id, Date.now()];
+  // 编辑也算「使用过」：updated_at 与 last_used_at 一起刷新（保留期清理看 last_used_at）
+  const touchedAt = Date.now();
+  const fields = ['"values" = ?', 'updated_by = ?', 'updated_at = ?', 'last_used_at = ?'];
+  const params: unknown[] = [JSON.stringify(values), user.id, touchedAt, touchedAt];
   if (body.position !== undefined) {
     fields.push('position = ?');
     params.push(asNumberValue(body.position, 'position'));
@@ -317,10 +322,10 @@ async function duplicateRecordsHandler(ctx: RequestContext): Promise<Response> {
     });
     await db
       .prepare(
-        `INSERT INTO records (id, database_id, "values", position, created_by, updated_by, is_archived, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+        `INSERT INTO records (id, database_id, "values", position, created_by, updated_by, is_archived, created_at, updated_at, last_used_at)
+         VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
       )
-      .bind(id, ctx.params.id, JSON.stringify(values), position, user.id, user.id, now, now)
+      .bind(id, ctx.params.id, JSON.stringify(values), position, user.id, user.id, now, now, now)
       .run();
     const record = await loadRecord(db, id);
     if (record) created.push(record);
@@ -366,6 +371,8 @@ async function pageHandler(ctx: RequestContext): Promise<Response> {
     loadRecords(db, ctx.params.id, limit, offset),
     countRecords(db, ctx.params.id),
   ]);
+  // 查询也算「使用过」：把这一页记录标成刚被用过（同一行一天只写一次，见 worker/usage.ts）
+  await touchRecordsUsed(db, ctx.params.id, rows.map((row) => row.id));
   // 保存过、计时窗口已过、且仍有内容的格子 + 还在 10 秒窗口内的格子（不受限制的访问者恒为空）
   const cellLocks = await loadCellEditLocks(
     db,
@@ -396,6 +403,8 @@ async function syncRecordHandler(ctx: RequestContext): Promise<Response> {
   const db = tableDb(ctx);
   const record = await loadRecord(db, access.recordId);
   if (!record) throw notFound('记录不存在');
+  // 打开记录卡片（含从收件箱跳转）与卡片打开期间的轮询都算「用过这条记录」
+  await touchRecordsUsed(db, access.databaseId, [access.recordId]);
   const [notes, cellLocks] = await Promise.all([
     loadNotes(ctx.env, db, [access.recordId]),
     loadCellEditLocks(db, access.databaseId, memberCellEditKey(access), [access.recordId]),

@@ -2,9 +2,13 @@
  * 表格名额的「时长」与「删表不退」记账（用户库的两张表，见 migrations/control/0017_slot_renewals.sql）。
  *
  * 两件事：
- *   1) **删表不退还名额**：基础 / 专业表格被删掉时写一行 `table_slot_consumptions`，
+ *   1) **删表带走名额**：表格被删掉时写一行 `table_slot_consumptions`，
  *      `GET /api/quota` 的「已用」= 未归档表格数 + 这些流水（见 `routes/quota.ts`）。
- *      试用表格不记账：删掉就退还名额（口径见 `shared/quota.ts`）。
+ *      三类表格都记账（2026-10 口径）：
+ *        - 基础 / 专业表格：删掉就等于把那个名额一起带走，不给回；
+ *        - 试用表格：删掉同样把名额带走（无法恢复），**但**账号里一张试用表格都没有时，
+ *          `shared/quota.ts` 的 `TRIAL_FREEBIE_FLOOR` 会保底给回 1 个名额 ——
+ *          也就是「试用表格全部删完后系统自动再赠 1 个」，每个人随时都能免费拥有一张。
  *   2) **表格的时长与续费**：基础 / 专业表格建表时按「该类型最近一次购买」的时长起算，
  *      写一行 `table_slot_allocations`（`expires_at` = 建表时刻 + 时长）；
  *      剩余不到一周（`SLOT_RENEW_WINDOW_DAYS`）时前端显示「续费」，
@@ -33,14 +37,14 @@ export interface RenewTarget {
 }
 
 /**
- * 记住「这张表把名额带走了」：删表时调用（试用表格不调用，所以这里直接忽略 trial）。
+ * 记住「这张表把名额带走了」：删表时调用（三类表格都记账 —— 试用表格删掉同样消耗名额，
+ * 但「试用表格全部删完」时由 `shared/quota.ts` 的保底规则再给回 1 个）。
  */
 export async function recordSlotConsumption(
   env: Env,
   input: { userId: string; databaseId: string; kind: TableKind | string; reason?: string },
 ): Promise<void> {
   const kind = asTableKind(input.kind);
-  if (kind === 'trial') return;
   await env.DB.prepare(
     `INSERT INTO table_slot_consumptions (id, user_id, database_id, kind, reason, created_at)
      VALUES (?, ?, ?, ?, ?, ?)`,
@@ -49,16 +53,24 @@ export async function recordSlotConsumption(
     .run();
 }
 
-/** 已经被「带走」的名额数（只有基础 / 专业两类会记账，试用表格恒为 0） */
-export async function countConsumedSlots(env: Env, userId: string): Promise<{ basic: number; pro: number }> {
+/** 已经被「带走」的名额数（三类各自记账；试用表格的保底规则在 `shared/quota.ts` 里补回来） */
+export async function countConsumedSlots(
+  env: Env,
+  userId: string,
+): Promise<{ trial: number; basic: number; pro: number }> {
   const row = await env.DB.prepare(
     `SELECT
+       (SELECT COUNT(*) FROM table_slot_consumptions WHERE user_id = ? AND kind = 'trial') AS trial,
        (SELECT COUNT(*) FROM table_slot_consumptions WHERE user_id = ? AND kind = 'basic') AS basic,
        (SELECT COUNT(*) FROM table_slot_consumptions WHERE user_id = ? AND kind = 'pro') AS pro`,
   )
-    .bind(userId, userId)
+    .bind(userId, userId, userId)
     .first<SqlRow>();
-  return { basic: sqlNumber(row ?? {}, 'basic'), pro: sqlNumber(row ?? {}, 'pro') };
+  return {
+    trial: sqlNumber(row ?? {}, 'trial'),
+    basic: sqlNumber(row ?? {}, 'basic'),
+    pro: sqlNumber(row ?? {}, 'pro'),
+  };
 }
 
 /**

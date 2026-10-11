@@ -58,6 +58,7 @@ import {
 } from '../mappers';
 import { loadNotes, loadUserContacts, mentionableUsers, type UserContact } from '../notes';
 import { forEachShardSafe, pickShard, requireEntityShard, shardDb, tableDb } from '../shards';
+import { touchRecordsUsed } from '../usage';
 import type { Env, RequestContext, Route } from '../types';
 
 const DEFAULT_PAGE_SIZE = 200;
@@ -529,6 +530,9 @@ export async function buildDatabaseDetail(
   const properties = scoped ? scopedProperties(allProperties, views) : allProperties;
   // 「创建人 / 最后编辑人」取自行元数据，可能指向并非成员的定向分享用户
   const people = await loadPeopleNames(env, page.rows);
+  // 查询也算「使用过」：表格详情 / 「加载更多」把这一页记录交给用户，就把它们标成刚被用过
+  // （同一行一天只写一次，见 worker/usage.ts；保留期清理按最后一次使用算）
+  await touchRecordsUsed(db, databaseId, page.rows.map((item) => item.id));
   // 勾选了「限制编辑」的访问者的单元格锁定状态（其它人恒为空 —— 不受限制）：
   // 计时窗口已过、又仍有内容的格子只读，窗口内的格子（cellEditGrace）还能再改
   const cellLocks = await loadCellEditLocks(
@@ -641,16 +645,16 @@ async function createHandler(ctx: RequestContext): Promise<Response> {
   }
 
   // 名额：三类表格各算各的，这一类用完了就得先补名额再建表。
-  // 名额口径见 src/shared/quota.ts（新注册账号默认 0 个基础 / 专业名额，送 1 个试用名额）：
-  //   试用表格不卖，只能靠邀请新用户注册 +1（见 worker/trialGrants.ts）；
-  //   基础表格没有赠额（分享也不加），只能购买；
-  //   专业表格也没有赠额（分享不再 +1），只能购买。
+  // 名额口径见 src/shared/quota.ts（新注册账号默认 0 个基础 / 专业名额，赠送 1 个试用名额）：
+  //   试用表格不卖，只能靠分享给新协作用户（对方通过邀请注册成功）+1；
+  //   基础表格没有赠额（分享也不加），只能订阅；
+  //   专业表格也没有赠额（分享不再 +1），只能订阅。
   const quota = await loadTableQuota(ctx.env, user.id);
   if (quota[kind].remaining <= 0) {
     const replenish =
       kind === 'trial'
-        ? '每成功邀请一位新用户注册可以 +1（试用表格不能购买）'
-        : '只能购买名额（分享不增加名额）';
+        ? '分享给一位新协作用户（对方通过邀请注册成功）可以 +1；试用表格不出售'
+        : '只能订阅名额（分享不增加名额）';
     throw forbidden(
       `${tableKindLabel(kind)}名额已用完（共 ${quota[kind].total} 个）：${replenish}`,
       QUOTA_EXCEEDED,
@@ -775,7 +779,8 @@ async function deleteHandler(ctx: RequestContext): Promise<Response> {
   }
 
   await db.prepare('DELETE FROM databases WHERE id = ?').bind(ctx.params.id).run();
-  // 记一笔「这个名额被带走了」：试用表格不记账（删掉照旧退还名额）
+  // 记一笔「这个名额被带走了」：三类表格都记 —— 试用表格删掉同样消耗名额，
+  // 但账号里一张试用表格都不剩时 shared/quota.ts 会保底给回 1 个名额（见 worker/slots.ts）
   if (meta && sqlString(meta, 'owner_id') === user.id) {
     await recordSlotConsumption(ctx.env, {
       userId: user.id,

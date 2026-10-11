@@ -79,10 +79,10 @@
   ],
 
   // ---- 定时任务（Cron Triggers）----------------------------------------
-  // 每天 03:00 UTC（北京时间 11:00）跑一次「保留期清理」：试用表格里超过半年
-  // （TRIAL_TABLE_RETENTION_DAYS）、基础表格里超过一年（BASIC_TABLE_RETENTION_DAYS）
-  // 的记录与附件会被自动清除，专业表格不受影响。逻辑见 src/worker/retention.ts，
-  // 入口是 index.ts 的 scheduled()。
+  // 每天 03:00 UTC（北京时间 11:00）跑一次「保留期清理」：试用表格里超过 1 年
+  // （TRIAL_TABLE_RETENTION_DAYS）、基础表格里超过 5 年（BASIC_TABLE_RETENTION_DAYS）
+  // **没有使用（编辑或查询）**的记录与附件会被自动清除，专业表格长期保留、不受影响。
+  // 逻辑见 src/worker/retention.ts，入口是 index.ts 的 scheduled()。
   // 本地调试可以 `npx wrangler dev --test-scheduled` 后请求 /__scheduled 手动触发，
   // 或者用管理员接口 POST /api/admin/maintenance/retention。
   "triggers": {
@@ -103,12 +103,13 @@
     // 基础表格读上面的 MAX_DATABASE_*，专业表格不限容量。
     "TRIAL_MAX_DATABASE_RECORDS": "100",
     "TRIAL_MAX_DATABASE_STORAGE_MB": "512",
-    // 基础表格的数据保留期（天）：超过这个时间的记录与附件会被定时任务清除；
-    // 专业表格永久保留。设成 0 可以关闭自动清理（只建议本地调试时用）。
-    "BASIC_TABLE_RETENTION_DAYS": "365",
-    // 试用表格的数据保留期（天，默认 180 = 半年）：口径同 shared/tableKind.ts；
+    // 基础表格的数据保留期（天，默认 1825 = 5 年）：「最后一次使用」（编辑或查询）
+    // 超过这个时间的记录与附件会被定时任务清除；专业表格长期保留。
+    // 设成 0 可以关闭自动清理（只建议本地调试时用）。
+    "BASIC_TABLE_RETENTION_DAYS": "1825",
+    // 试用表格的数据保留期（天，默认 365 = 1 年）：口径同 shared/tableKind.ts；
     // 设成 0 表示关闭试用表格的自动清理。
-    "TRIAL_TABLE_RETENTION_DAYS": "180",
+    "TRIAL_TABLE_RETENTION_DAYS": "365",
     // set to "false" to close public registration
     "ALLOW_SIGNUP": "true",
     // 注册确认码（邮箱验证）的有效期，分钟
