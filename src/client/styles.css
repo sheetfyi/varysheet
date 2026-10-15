@@ -1583,6 +1583,294 @@ textarea.input {
   margin: 0 0 16px;
 }
 
+/* ------------------------------------- 登录页（左右分栏，复刻 Sealos 登录页）
+ *
+ * 结构见 components/AuthPage.tsx 的 `AuthShell`：
+ *   .signin          整屏：左半边深色插画（.signin-visual）+ 右半边白色表单（.signin-main）
+ *   .signin-panel    表单列：宽 360（内容 328），在右半边里水平垂直居中
+ * 尺寸/配色取自参考站的实测值（输入框 40 高、主按钮纯黑 #0a0a0a、次要按钮 #dfe2ea 描边…），
+ * 窄屏（≤900px）时左半边整块收起、站标顶在表单上方，见文件末尾的手机适配。
+ */
+
+.signin {
+  display: flex;
+  height: 100%;
+  min-height: 100vh;
+  background: var(--bg);
+  color: #0a0a0a;
+}
+
+/* 左半边：黑底 + 插画（插画是内联 SVG，见 SigninVisual） */
+.signin-visual {
+  position: relative;
+  flex: 0 0 50%;
+  max-width: 50%;
+  overflow: hidden;
+  background: #0a0a0a;
+}
+
+.signin-art {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* 插画上的四步流程文案（SVG 里的 text 用 class 上色，比逐个写 fill 好维护） */
+.signin-art-title {
+  fill: #fff;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.signin-art-desc {
+  fill: rgba(255, 255, 255, 0.45);
+  font-size: 13px;
+}
+
+/* 插画左上角的站标 */
+.signin-visual .signin-brand {
+  position: absolute;
+  top: 40px;
+  left: 40px;
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  color: #fff;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.signin-visual .signin-brand .brand-icon {
+  width: 44px;
+  height: 44px;
+  margin-right: 0;
+  border-radius: 12px;
+}
+
+.signin-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 16px;
+  background: var(--bg);
+  overflow-y: auto;
+}
+
+/* 站标只在窄屏（没有左侧插画）时出现 */
+.signin-mobile-brand {
+  display: none;
+  align-items: center;
+  gap: 10px;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.signin-mobile-brand .brand-icon {
+  width: 32px;
+  height: 32px;
+  margin-right: 0;
+  border-radius: 8px;
+}
+
+.signin-panel {
+  width: 100%;
+  max-width: 360px;
+  padding: 0 16px;
+}
+
+/*
+ * 表单本体不再是卡片。保留 .auth-card 类只是为了兼容 tools/mobile-check 下的脚本选择器，
+ * 这里把那个类带来的边框 / 内边距 / 阴影全部清掉。
+ */
+.signin-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: none;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+/* 卡片时代给 p.muted 留的下边距在新表单里会和 flex gap 叠加，这里收掉 */
+.signin-form p.muted {
+  margin: 0;
+}
+
+.signin-head {
+  margin-bottom: 16px;
+  text-align: center;
+}
+
+/* 标题：24px / 600，居中（参考站的「欢迎来到 Sealos」就是这个规格） */
+.signin-form .signin-title {
+  margin: 0;
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 36px;
+  color: #0a0a0a;
+}
+
+.signin-subtitle {
+  margin: 6px 0 0;
+  font-size: 14px;
+  line-height: 21px;
+  color: #71717a;
+}
+
+.signin-field {
+  position: relative;
+  display: block;
+}
+
+/* 字段名的兜底：参考站只有占位符，这里把 label 视觉隐藏（读屏仍能念到） */
+.signin-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.signin-field-icon {
+  position: absolute;
+  top: 50%;
+  left: 12px;
+  display: flex;
+  color: #71717a;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.signin-input {
+  width: 100%;
+  height: 40px;
+  padding: 10px 12px 10px 40px; /* 左边 40px 让出图标的位置 */
+  border: 1px solid #e4e4e7;
+  border-radius: 8px;
+  background: #fff;
+  font: inherit;
+  font-size: 14px;
+  line-height: 21px;
+  color: #0a0a0a;
+}
+
+/* 没有左侧图标时（比如 6 位确认码）左右留白对称 */
+.signin-input-flat {
+  padding-left: 12px;
+}
+
+.signin-input::placeholder {
+  color: #71717a;
+}
+
+.signin-input:focus {
+  outline: none;
+  border-color: #0a0a0a;
+  box-shadow: 0 0 0 3px rgba(10, 10, 10, 0.08);
+}
+
+.signin-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  height: 40px;
+  padding: 0 16px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.signin-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* 主按钮：纯黑底白字（参考站的「登录 →」，禁用时整体降到 40% 不透明度） */
+.signin-btn-primary {
+  background: #0a0a0a;
+  color: #fff;
+}
+
+.signin-btn-primary:hover:not(:disabled) {
+  background: #27272a;
+}
+
+/* 次按钮：白底 + 浅灰描边（参考站的「微信 / GitHub」样式） */
+.signin-btn-secondary {
+  background: #fff;
+  border-color: #dfe2ea;
+  color: #485264;
+  box-shadow: 0 1px 2px rgba(19, 51, 107, 0.05), 0 0 1px rgba(19, 51, 107, 0.08);
+}
+
+.signin-btn-secondary:hover:not(:disabled) {
+  background: #f7f8fa;
+}
+
+/* 「或」分隔线：两条细线夹一个字 */
+.signin-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.signin-divider-line {
+  flex: 1;
+  height: 1px;
+  background: #e4e4e7;
+}
+
+.signin-divider-text {
+  font-size: 12px;
+  line-height: 18px;
+  color: #71717a;
+}
+
+/* 主按钮下面那排次要入口 */
+.signin-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* 底部那行条款说明 */
+.signin-consent {
+  margin: 0;
+  font-size: 14px;
+  line-height: 21px;
+  text-align: center;
+  color: #718096;
+}
+
+.signin-consent-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.signin-consent-link:hover {
+  text-decoration: underline;
+}
+
 .center-list {
   display: flex;
   flex-direction: column;
@@ -2093,6 +2381,28 @@ textarea.input {
   .input,
   select.input,
   textarea.input {
+    font-size: 16px;
+  }
+
+  /* 登录页：左半边插画整块收起（参考站窄屏也是只留表单），站标改顶在表单上方显示 */
+  .signin-visual {
+    display: none;
+  }
+
+  /* 表单从顶部开始排：键盘弹起时输入框与提交按钮仍可见、可点（同上面 .centered 的处理） */
+  .signin-main {
+    justify-content: flex-start;
+    padding: 32px 16px 40px;
+  }
+
+  .signin-mobile-brand {
+    display: inline-flex;
+    margin-bottom: 24px;
+  }
+
+  /* 同上面 .input：输入框字号锁到 16px，避免 iOS 上整页被放大 */
+  .signin-input,
+  .signin-input-flat {
     font-size: 16px;
   }
 
