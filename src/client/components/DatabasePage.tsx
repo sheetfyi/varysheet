@@ -2,7 +2,7 @@
  * The database workspace: header (rename / share), view tabs, and the active
  * view body (table / board / gallery). Owns every mutation for one database.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createId, cellLockHint, cellLockKey, defaultFilterValueForType, defaultOperatorForType, isEmptyValue, sameCellValue } from '../../shared/fields';
 import type {
   CellValue,
@@ -31,6 +31,7 @@ import { applyView, groupRows, visibleProperties } from '../lib/viewEngine';
 import { BoardView, GalleryView } from './CardViews';
 import type { UserNames } from './Cell';
 import { FilterPanel } from './FilterPanel';
+import { IconPicker } from './IconPicker';
 import { Popover } from './Popover';
 import { PropertyDialog } from './PropertyDialog';
 import { RecordDialog } from './RecordDialog';
@@ -49,6 +50,8 @@ const OPEN_ROW_POLL_MS = 20_000;
 const LIVE_SYNC_POLL_MS = 5_000;
 /** 别人改过的格子高亮多久（与 styles.css 里 cell-flash 动画的时长一致） */
 const FLASH_MS = 1_800;
+/** 顶栏名称框最窄也要有这么多（与 styles.css 里 .title-input 的 min-width 对齐） */
+const TITLE_MIN_WIDTH = 48;
 
 export type ToastFn = (message: string, kind?: 'info' | 'error') => void;
 
@@ -93,6 +96,10 @@ export function DatabasePage({
   const [shareOpen, setShareOpen] = useState(false);
   const [shareViewId, setShareViewId] = useState<string | null>(null);
   const [nameDraft, setNameDraft] = useState(database.name);
+  /** 顶栏名称框（宽度要跟着文字走，见下面的 syncTitleWidth） */
+  const titleInputRef = useRef<HTMLInputElement>(null);
+  /** 量文字宽度用的 2D 上下文：建一次就复用，避免每次都摸 DOM */
+  const titleMeasureRef = useRef<CanvasRenderingContext2D | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   /** 已经按顺序从服务端读过的行数：下一页从它往后取（本地增量合并进来的行不算，避免游标偏移） */
   const loadedCountRef = useRef(database.rows.length);
@@ -978,6 +985,65 @@ export function DatabasePage({
     onReloadList();
   };
 
+  /**
+   * 顶栏名称框的宽度：跟着文字走 —— 名字短就不拖一条空框，长了才占地方，
+   * 再长则封顶在「同一行还能给它的宽度」上，让 CSS 那套「保头 + 末尾 …」收尾：
+   * 框一旦比一行剩下的空间还宽，图标 / 徽标 / 成员数 / 删除表格就没地方待了
+   * （实测把框撑到整段文字的宽度时，顶栏会被挤成两行，整页内容跟着往下沉）。
+   *
+   * 宽度用 canvas 量文字（比塞一个隐藏镜像节点少一次布局）；下面两种情况要重量：
+   * 窗口尺寸跨断点时字号会变（桌面 18px / 手机 16px），Inter 也可能晚于首帧到位。
+   */
+  const syncTitleWidth = useCallback(() => {
+    const input = titleInputRef.current;
+    if (!input) return;
+    const style = getComputedStyle(input);
+    const context =
+      titleMeasureRef.current ?? (titleMeasureRef.current = document.createElement('canvas').getContext('2d'));
+    if (!context) return;
+    context.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+    const frame =
+      parseFloat(style.paddingLeft) +
+      parseFloat(style.paddingRight) +
+      parseFloat(style.borderLeftWidth) +
+      parseFloat(style.borderRightWidth);
+    // 名字清空时也要留一点点宽（按一个空格量），+2px 是免得最后一个字正好被 … 吃掉
+    const text = context.measureText(input.value || ' ').width;
+    let width = Math.ceil(text + frame) + 2;
+    const bar = input.parentElement;
+    if (bar) {
+      const barStyle = getComputedStyle(bar);
+      const gap = parseFloat(barStyle.columnGap) || 0;
+      const inner = bar.clientWidth - parseFloat(barStyle.paddingLeft) - parseFloat(barStyle.paddingRight);
+      let taken = 0;
+      let others = 0;
+      for (const child of Array.from(bar.children)) {
+        if (child === input) continue;
+        const childStyle = getComputedStyle(child);
+        // 跳过会自动吸收剩余空间的 .spacer：它有多宽取决于名称框，不能算进占位
+        if (childStyle.display === 'none' || parseFloat(childStyle.flexGrow) > 0) continue;
+        // 跳过「本来就会给名称框让位」的文字项：手机端的成员数那一条能被压到 0
+        // （min-width: 0 + 省略号），桌面端不能 —— 它一缩就变成好几行，反而把栏撑高
+        const yields =
+          parseFloat(childStyle.flexShrink) > 0 &&
+          (childStyle.minWidth === '0px' || childStyle.overflowX !== 'visible');
+        if (yields) continue;
+        taken += child.getBoundingClientRect().width;
+        others += 1;
+      }
+      // 每两个相邻子元素之间一个 gap，这里多留一个 gap 的余量（宁可早一点省略）
+      width = Math.min(width, Math.max(inner - taken - gap * (others + 1), TITLE_MIN_WIDTH));
+    }
+    input.style.width = `${width}px`;
+  }, []);
+
+  useLayoutEffect(() => {
+    syncTitleWidth();
+    window.addEventListener('resize', syncTitleWidth);
+    void document.fonts.ready.then(syncTitleWidth);
+    return () => window.removeEventListener('resize', syncTitleWidth);
+  }, [syncTitleWidth, nameDraft, viewScoped]);
+
   /* ----------------------------------------------------------------- render */
 
   const boardGroupProperty = activeView?.config.groupBy
@@ -989,17 +1055,17 @@ export function DatabasePage({
       {/* 定向分享的访客（viewScoped）只能看被分享的视图：隐藏「表格名称」这一整行顶部栏 */}
       {!viewScoped ? (
         <header className="topbar">
-          <input
-            className="icon-input"
-            value={detail.icon}
-            maxLength={4}
-            title="图标"
-            disabled={!canEdit}
-            onChange={(event) => setDetail((prev) => ({ ...prev, icon: event.target.value }))}
-            onBlur={(event) => void changeIcon(event.target.value.trim() || '📋')}
-          />
+          {/* 表格图标：点一下弹常用 emoji 面板选一个（没有编辑权限就只读展示） */}
+          {canEdit ? (
+            <IconPicker value={detail.icon} onChange={(icon) => void changeIcon(icon)} />
+          ) : (
+            <span className="icon-input readonly" title="表格图标">
+              {detail.icon || '📋'}
+            </span>
+          )}
           <input
             className="title-input"
+            ref={titleInputRef}
             value={nameDraft}
             disabled={!canEdit}
             onChange={(event) => setNameDraft(event.target.value)}

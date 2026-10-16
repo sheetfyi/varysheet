@@ -1354,6 +1354,12 @@ textarea.input {
   display: inline-flex;
 }
 
+/* 顶栏那个 emoji 图标按钮（IconPicker）就装在 .popover-host 里：
+   宽度固定，不参与名称框的伸缩（和 .topbar .icon-input 一个道理） */
+.topbar .popover-host {
+  flex: 0 0 auto;
+}
+
 /* 筛选面板：说明文字 + 若干个「必须满足」块（块之间是且，块里是任意满足） */
 .filter-head {
   display: flex;
@@ -1964,12 +1970,70 @@ textarea.input {
   cursor: default;
 }
 
+/* 顶栏那个可点的图标按钮（IconPicker 的触发器）：尺寸沿用 .icon-input，
+   只补上「悬停 / 展开 / 禁用」三种状态（<button> 上不会继承 input 的这些表现） */
+button.icon-input {
+  cursor: pointer;
+}
+
+button.icon-input:hover:not(:disabled) {
+  border-color: var(--border);
+}
+
+button.icon-input.open,
+button.icon-input:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+}
+
+button.icon-input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* 图标下拉面板：分组标题 + emoji 网格（窄屏自动少几列，不横向溢出） */
+.icon-picker-group + .icon-picker-group {
+  margin-top: 8px;
+}
+
+.icon-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(34px, 1fr));
+  gap: 4px;
+}
+
+.icon-picker-cell {
+  height: 34px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  font-size: 19px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.icon-picker-cell:hover {
+  border-color: var(--border);
+  background: var(--bg-sunken);
+}
+
+.icon-picker-cell.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
 .title-input {
   /* 表格名很长时（移动端一行只剩一小段宽度）也得单行省略：
      <input> 没有子元素、自己就是「装文字的盒子」，所以能直接画「…」，
      不用像 .cell-view 那样套一层文字盒子。聚焦时浏览器按光标滚动处理，
-     看不到省略号，失焦后即恢复「保头 + 末尾 …」。 */
-  min-width: 180px;
+     看不到省略号，失焦后即恢复「保头 + 末尾 …」。
+     宽度不是固定的：JS 按当前文字量出来（见 DatabasePage 的 syncTitleWidth），
+     所以短名字不会拖一条空框；整行放不下时由 flex 收缩，再走上面的「…」。 */
+  width: auto;
+  flex: 0 1 auto;
+  min-width: 48px;
+  max-width: 100%;
   padding: 2px 6px;
   border: 1px solid transparent;
   border-radius: 6px;
@@ -2468,14 +2532,9 @@ textarea.input {
     font-size: 16px;
   }
 
-  /* 名称框占满「同一行剩下的宽度」，而不是 width:100% 自己吃掉一整行、
-     把图标 / 角色徽标 / 成员数 / 删除表格全挤到下一行。
-     长表格名照旧「保头 + 末尾 …」（理由见 .title-input 的注释）。 */
-  .title-input {
-    width: auto;
-    flex: 1 1 auto;
-    min-width: 0;
-  }
+  /* 名称框在手机上也是「宽度跟着文字走」（见 .title-input 与 DatabasePage 的
+      syncTitleWidth）：不再占满「同一行剩下的宽度」，长名字宁可自己省略，
+     也别把图标 / 角色徽标 / 成员数 / 删除表格挤到下一行。 */
 
   /* 图标、徽标、按钮、视图标签：宽度固定不参与收缩，保证认得出、点得到 */
   .topbar .icon-input,
@@ -2491,11 +2550,21 @@ textarea.input {
      宽度不够时用省略号收掉，绝不折成竖排文字。 */
   .topbar .small.muted,
   .viewbar .small.muted {
-    flex: 0 1 auto;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  /* 名称框的宽度跟着表格名走（见 .title-input 与 DatabasePage 的 syncTitleWidth）：
+     一行装不下时让它先拿够自己那点宽度，「N 位成员 · M 条记录」这条弱信息最后再保 ——
+     被压到 0 也只是少一行灰字，而表格名少几个字就读不出来了。 */
+  .topbar .small.muted {
+    flex: 0 100 auto;
+  }
+
+  .viewbar .small.muted {
+    flex: 0 1 auto;
   }
 
   .view-toolbar {
